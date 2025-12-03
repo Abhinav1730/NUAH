@@ -73,3 +73,5 @@ The SQLite database is automatically created with the following schema:
 - Active traders (users with active bots) are fetched with priority
 - All data is stored with timestamps for tracking freshness
 
+
+
