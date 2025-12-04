@@ -1,0 +1,4 @@
+"""
+trend-agent package bootstrap.
+"""
+
