@@ -1,0 +1,4 @@
+"""
+rules-agent package bootstrap.
+"""
+
