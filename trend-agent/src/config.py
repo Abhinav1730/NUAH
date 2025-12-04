@@ -19,6 +19,23 @@ class TrendAgentSettings(BaseSettings):
     max_tokens: int = Field(
         default=4, description="Max tokens to include per run (avoids prompt bloat)."
     )
+    cache_dir: Path = Field(
+        default=Path("./cache"),
+        description="Directory for caching API results.",
+        env="TREND_AGENT_CACHE_DIR",
+    )
+    cache_ttl_hours: int = Field(
+        default=2,
+        description="Cache time-to-live in hours.",
+    )
+    momentum_change_threshold: float = Field(
+        default=0.15,
+        description="Minimum momentum change (%) to trigger API call (Strategy 1: Smart Caching).",
+    )
+    volatility_threshold: float = Field(
+        default=0.20,
+        description="Minimum volatility to trigger API call.",
+    )
 
     class Config:
         env_file = ".env"
@@ -27,6 +44,10 @@ class TrendAgentSettings(BaseSettings):
 
     @validator("data_dir", pre=True)
     def _expand(cls, value: Path) -> Path:
+        return Path(value).expanduser().resolve()
+
+    @validator("cache_dir", pre=True)
+    def _expand_cache_dir(cls, value: Path) -> Path:
         return Path(value).expanduser().resolve()
 
 

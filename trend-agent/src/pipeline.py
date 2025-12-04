@@ -3,10 +3,11 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Iterable, List
+from typing import Iterable, List, Optional
 
 import pandas as pd
 
+from .cache_manager import CacheManager
 from .config import TrendAgentSettings
 from .data_store import TrendDataStore
 from .deepseek_client import DeepSeekClient
@@ -20,6 +21,7 @@ class TrendAgentPipeline:
         self.settings = settings
         self.store = TrendDataStore(settings.data_dir)
         self.client = DeepSeekClient(settings)
+        self.cache = CacheManager(settings.cache_dir, settings.cache_ttl_hours)
 
     def run(self) -> List[dict]:
         time_series = self.store.load_time_series()
@@ -29,7 +31,7 @@ class TrendAgentPipeline:
             return []
 
         iso_now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-        signals = self._generate_signals(contexts, iso_now)
+        signals = self._generate_signals_with_cache(contexts, iso_now, time_series)
         if not signals:
             signals = fallback_signals(contexts, iso_now)
 
@@ -38,48 +40,143 @@ class TrendAgentPipeline:
         logger.info("Trend agent stored %d signals.", len(signals))
         return signals
 
-    def _generate_signals(
-        self, contexts: Iterable[TrendContext], iso_now: str
+    def _generate_signals_with_cache(
+        self,
+        contexts: Iterable[TrendContext],
+        iso_now: str,
+        time_series: pd.DataFrame,
     ) -> List[dict]:
+        """
+        Generate signals with smart caching (Strategy 1).
+        Only calls API if significant changes detected or cache expired.
+        """
         if self.settings.dry_run:
             return fallback_signals(contexts, iso_now)
 
+        signals = []
+        contexts_list = list(contexts)
+
+        for ctx in contexts_list:
+            cache_key = f"trend_{ctx.token_mint}"
+            cached = self.cache.load_cache(cache_key)
+
+            # Check if we need to call API (Strategy 1: Smart Caching)
+            should_call_api = self._should_call_api(ctx, cached, time_series)
+
+            if should_call_api:
+                logger.info(
+                    f"Calling API for {ctx.token_mint} (change detected or cache expired)"
+                )
+                signal = self._generate_signal_for_token(ctx, iso_now)
+                if signal:
+                    signals.append(signal)
+                    # Cache the result
+                    self.cache.save_cache(
+                        cache_key,
+                        signal,
+                        metadata={
+                            "momentum": ctx.momentum,
+                            "volatility": ctx.volatility,
+                            "volume": ctx.volume,
+                            "close": ctx.close,
+                        },
+                    )
+                else:
+                    # API failed, use fallback
+                    fallback = fallback_signals([ctx], iso_now)
+                    signals.extend(fallback)
+            else:
+                # Use cached result
+                if cached and cached.get("data"):
+                    cached_signal = cached["data"].copy()
+                    cached_signal["timestamp"] = iso_now  # Update timestamp
+                    signals.append(cached_signal)
+                    logger.debug(f"Using cached signal for {ctx.token_mint}")
+                else:
+                    # No cache, use fallback
+                    fallback = fallback_signals([ctx], iso_now)
+                    signals.extend(fallback)
+
+        return signals
+
+    def _should_call_api(
+        self,
+        ctx: TrendContext,
+        cached: Optional[dict],
+        time_series: pd.DataFrame,
+    ) -> bool:
+        """
+        Determine if API call is needed based on change detection (Strategy 1).
+        
+        Returns True if:
+        1. No cache exists
+        2. Cache expired (> TTL hours)
+        3. Momentum changed > threshold since last cache
+        4. Volatility > threshold
+        """
+        if not cached:
+            return True  # No cache, need to call
+
+        cached_metadata = cached.get("metadata", {})
+        cached_momentum = cached_metadata.get("momentum", 0.0)
+        cached_volatility = cached_metadata.get("volatility", 0.0)
+
+        # Check momentum change
+        momentum_change = abs(ctx.momentum - cached_momentum)
+        if momentum_change >= self.settings.momentum_change_threshold:
+            logger.info(
+                f"Momentum change detected for {ctx.token_mint}: "
+                f"{cached_momentum:.3f} -> {ctx.momentum:.3f} (Δ={momentum_change:.3f})"
+            )
+            return True
+
+        # Check volatility threshold
+        if ctx.volatility >= self.settings.volatility_threshold:
+            logger.info(
+                f"High volatility detected for {ctx.token_mint}: {ctx.volatility:.3f}"
+            )
+            return True
+
+        # No significant change, use cache
+        return False
+
+    def _generate_signal_for_token(
+        self, ctx: TrendContext, iso_now: str
+    ) -> Optional[dict]:
+        """Generate signal for a single token via API."""
         system_prompt = (
-            "You are a DeFi trend analyst. Return JSON array with fields: "
+            "You are a DeFi trend analyst. Return JSON object (not array) with fields: "
             "token_mint, trend_score (-1..1), stage (early/mid/late), "
             "volatility_flag (low/moderate/high), liquidity_flag (thin/healthy), summary."
         )
-        user_prompt = "Evaluate the following quantitative snapshots:\n"
-        for ctx in contexts:
-            user_prompt += (
-                f"- {ctx.token_mint}: momentum={ctx.momentum:.3f}, "
-                f"volatility={ctx.volatility:.3f}, volume={ctx.volume:.0f}, "
-                f"close={ctx.close:.3f}\n"
-            )
+        user_prompt = (
+            f"Evaluate the following quantitative snapshot:\n"
+            f"{ctx.token_mint}: momentum={ctx.momentum:.3f}, "
+            f"volatility={ctx.volatility:.3f}, volume={ctx.volume:.0f}, "
+            f"close={ctx.close:.3f}"
+        )
 
         records = self.client.structured_completion(system_prompt, user_prompt)
         if not records:
-            return []
-        normalized = []
-        for entry in records:
-            token = entry.get("token_mint")
-            if not token:
-                continue
-            normalized.append(
-                {
-                    "signal_id": entry.get("signal_id")
-                    or f"TREND-{uuid.uuid4().hex[:8]}",
-                    "timestamp": iso_now,
-                    "token_mint": token,
-                    "trend_score": float(entry.get("trend_score", 0)),
-                    "stage": entry.get("stage", "mid"),
-                    "volatility_flag": entry.get("volatility_flag", "moderate"),
-                    "liquidity_flag": entry.get("liquidity_flag", "healthy"),
-                    "confidence": float(entry.get("confidence", 0.65)),
-                    "summary": entry.get("summary", "No summary."),
-                }
-            )
-        return normalized
+            return None
+
+        # Handle both array and single object responses
+        entry = records[0] if isinstance(records, list) else records
+        token = entry.get("token_mint") or ctx.token_mint
+        if not token:
+            return None
+
+        return {
+            "signal_id": entry.get("signal_id") or f"TREND-{uuid.uuid4().hex[:8]}",
+            "timestamp": iso_now,
+            "token_mint": token,
+            "trend_score": float(entry.get("trend_score", 0)),
+            "stage": entry.get("stage", "mid"),
+            "volatility_flag": entry.get("volatility_flag", "moderate"),
+            "liquidity_flag": entry.get("liquidity_flag", "healthy"),
+            "confidence": float(entry.get("confidence", 0.65)),
+            "summary": entry.get("summary", "No summary."),
+        }
 
     def _refresh_catalog(self, signals: Iterable[dict]) -> None:
         catalog = self.store.load_catalog()
