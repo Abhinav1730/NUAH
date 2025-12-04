@@ -1,0 +1,4 @@
+"""
+trade-agent core package.
+"""
+
