@@ -3,16 +3,19 @@ import { ApiClient } from './apiClient';
 import { DataService } from './dataService';
 import { UserData } from '../types/userData.types';
 import { Database } from '../database/sqlite';
+import { SnapshotExporter } from '../exporters/snapshotExporter';
 
 export class UserDataService {
   private apiClient: ApiClient;
   private dataService: DataService;
   private batchSize: number;
+  private snapshotExporter: SnapshotExporter;
 
   constructor(db: Database) {
     this.apiClient = new ApiClient();
     this.dataService = new DataService(db);
     this.batchSize = parseInt(process.env.BATCH_SIZE || '10', 10);
+    this.snapshotExporter = new SnapshotExporter();
   }
 
   /**
@@ -29,6 +32,7 @@ export class UserDataService {
       }
 
       await this.dataService.storeUserData(userData);
+      await this.exportSnapshot(userData);
       console.log(`✅ Successfully stored data for user ${userId}`);
       return true;
     } catch (error: any) {
@@ -140,5 +144,13 @@ export class UserDataService {
    */
   async testConnection(): Promise<boolean> {
     return await this.apiClient.testConnection();
+  }
+
+  private async exportSnapshot(userData: UserData): Promise<void> {
+    try {
+      await this.snapshotExporter.writeSnapshots(userData);
+    } catch (error: any) {
+      console.error(`⚠️ Snapshot export failed for user ${userData.userId}:`, error.message);
+    }
   }
 }
