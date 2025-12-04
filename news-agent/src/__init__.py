@@ -1,0 +1,4 @@
+"""
+news-agent package bootstrap.
+"""
+
