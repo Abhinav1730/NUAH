@@ -20,6 +20,8 @@ cp .env.example .env
 - `DB_PATH`: Path to SQLite database file (default: ./data/user_data.db)
 - `FETCH_INTERVAL_MINUTES`: Fetch interval in minutes (default: 20)
 - `BATCH_SIZE`: Number of users to fetch per batch (default: 10)
+- `SNAPSHOT_OUTPUT_DIR`: Directory for exported snapshots (default: ./data/snapshots)
+- `SNAPSHOT_SCHEMA_VERSION`: Snapshot schema version tag (default: 1.0.0)
 
 ## Usage
 
@@ -55,6 +57,10 @@ npm start -- --run-now
    - `user_portfolios` - Portfolio snapshots
    - `user_bots` - Bot configurations
    - `market_data` - Token market data
+5. **Snapshot Exporter**: After each successful fetch the agent now writes
+   `user_<ID>.json` (human-readable) and `user_<ID>.toon` (Protobuf binary) files
+   into `./data/snapshots` so downstream agents can ingest typed payloads. Full
+   schema details live in `../SNAPSHOT_SCHEMA.md`.
 
 ## Database Schema
 
