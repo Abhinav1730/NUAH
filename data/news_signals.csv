@@ -1,0 +1,5 @@
+signal_id,timestamp,token_mint,headline,sentiment_score,confidence,source,summary
+NEWS-0001,2025-12-04T08:50:00Z,MintAlpha123,"Chronos AI secures integration with major DApp",0.78,0.81,CryptoPanic,"Partnership suggests sustained user growth and higher on-chain demand."
+NEWS-0002,2025-12-04T08:45:00Z,MintBeta456,"Solana Forge treasury expands liquidity pool",0.56,0.72,DeepSeek,"Liquidity injection lowers slippage risk for medium trades."
+NEWS-0003,2025-12-04T08:30:00Z,MintGamma789,"Lunar Labs faces smart-contract audit delays",-0.34,0.69,DeepSeek,"Delay fuels concern about roadmap delivery and potential bugs."
+

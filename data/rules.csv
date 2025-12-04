@@ -1,0 +1,5 @@
+rule_id,description,scope,param,value,condition,enabled
+RULE_MIN_BALANCE,Minimum balance before trading,global,min_portfolio_ndollar,50,portfolio_value>=value,true
+RULE_MAX_TRADES_DAY,Maximum trades per user per day,user,max_trades_per_day,5,trades_today<value,true
+RULE_BLOCKLIST,Blocklisted tokens,token,blocked_tokens,MintGamma789,token_not_in_list,true
+

@@ -1,0 +1,4 @@
+user_id,risk_profile,max_trades_per_day,max_position_ndollar,allowed_tokens,blocked_tokens,dry_run
+101,balanced,4,2500,"MintAlpha123|MintBeta456","MintGamma789",false
+202,aggressive,6,5000,"MintAlpha123|MintGamma789","",true
+
