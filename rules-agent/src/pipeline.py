@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Dict, Iterable, List
+from typing import Dict, Iterable, List, Optional
 
 import pandas as pd
 
+from .cache_manager import CacheManager
 from .config import RulesAgentSettings
 from .data_store import RulesDataStore
 from .deepseek_client import DeepSeekClient
@@ -19,6 +22,7 @@ class RulesAgentPipeline:
         self.settings = settings
         self.store = RulesDataStore(settings.data_dir)
         self.client = DeepSeekClient(settings)
+        self.cache = CacheManager(settings.cache_dir, settings.cache_ttl_hours)
 
     def run(self) -> List[dict]:
         rules = self.store.load_rules()
@@ -85,6 +89,56 @@ class RulesAgentPipeline:
         if self.settings.dry_run or not self.settings.openrouter_api_key:
             return self._fallback(context, iso_now)
 
+        # Generate cache key based on user_id, rules hash, and token list
+        rules_hash = self._hash_rules(rules)
+        tokens_hash = self._hash_tokens(context["tokens"])
+        cache_key = f"rules_user_{context['user_id']}_rules_{rules_hash}_tokens_{tokens_hash}"
+
+        # Check cache
+        cached = self.cache.load_cache(cache_key)
+
+        # Check if we need to call API (Strategy 1: Smart Caching)
+        should_call_api = self._should_call_api(context, cached, rules)
+
+        if should_call_api:
+            logger.info(
+                f"Calling API for user {context['user_id']} "
+                f"(change detected, high risk, or cache expired)"
+            )
+            evaluations = self._evaluate_user_via_api(rules, context, iso_now)
+            if evaluations:
+                # Cache the result
+                self.cache.save_cache(
+                    cache_key,
+                    evaluations,
+                    metadata={
+                        "user_id": context["user_id"],
+                        "risk_profile": context["risk_profile"],
+                        "rules_hash": rules_hash,
+                        "tokens_hash": tokens_hash,
+                    },
+                )
+                return evaluations
+            else:
+                # API failed, use fallback
+                return self._fallback(context, iso_now)
+        else:
+            # Use cached result
+            if cached and cached.get("data"):
+                cached_evaluations = cached["data"]
+                # Update timestamps
+                for eval_item in cached_evaluations:
+                    eval_item["timestamp"] = iso_now
+                logger.debug(f"Using cached evaluations for user {context['user_id']}")
+                return cached_evaluations
+            else:
+                # No cache, use fallback
+                return self._fallback(context, iso_now)
+
+    def _evaluate_user_via_api(
+        self, rules: pd.DataFrame, context: Dict, iso_now: str
+    ) -> List[dict]:
+        """Evaluate user rules via API call."""
         rule_text = "\n".join(
             f"- {row['rule_id']}: {row['description']} ({row['param']}={row['value']})"
             for _, row in rules.iterrows()
@@ -112,7 +166,7 @@ Tokens:
 """
         records = self.client.structured_completion(system_prompt, user_prompt)
         if not records:
-            return self._fallback(context, iso_now)
+            return []
 
         evaluations = []
         for entry in records:
@@ -140,6 +194,65 @@ Tokens:
                 }
             )
         return evaluations
+
+    def _should_call_api(
+        self, context: Dict, cached: Optional[dict], rules: pd.DataFrame
+    ) -> bool:
+        """
+        Determine if API call is needed based on change detection (Strategy 1).
+        
+        Returns True if:
+        1. No cache exists
+        2. Cache expired (> TTL hours)
+        3. User has aggressive risk profile (if require_api_for_aggressive=True)
+        4. Any token has risk_score > 0.7 (if require_api_for_high_risk=True)
+        """
+        if not cached:
+            return True  # No cache, need to call
+
+        # Check for aggressive risk profile
+        if (
+            self.settings.require_api_for_aggressive
+            and context.get("risk_profile") == "aggressive"
+        ):
+            logger.info(
+                f"Aggressive risk profile for user {context['user_id']}, calling API"
+            )
+            return True
+
+        # Check for high-risk tokens
+        if self.settings.require_api_for_high_risk:
+            high_risk_tokens = [
+                t for t in context["tokens"] if t.get("risk_score", 0) > 0.7
+            ]
+            if high_risk_tokens:
+                logger.info(
+                    f"High-risk tokens detected for user {context['user_id']}, calling API"
+                )
+                return True
+
+        # No significant change, use cache
+        return False
+
+    @staticmethod
+    def _hash_rules(rules: pd.DataFrame) -> str:
+        """Generate hash of rules for cache key."""
+        if rules.empty:
+            return "empty"
+        rules_str = json.dumps(
+            rules[["rule_id", "param", "value"]].to_dict("records"), sort_keys=True
+        )
+        return hashlib.md5(rules_str.encode()).hexdigest()[:8]
+
+    @staticmethod
+    def _hash_tokens(tokens: List[Dict]) -> str:
+        """Generate hash of token list for cache key."""
+        if not tokens:
+            return "empty"
+        tokens_str = json.dumps(
+            sorted([t["token_mint"] for t in tokens]), sort_keys=True
+        )
+        return hashlib.md5(tokens_str.encode()).hexdigest()[:8]
 
     def _fallback(self, context: Dict, iso_now: str) -> List[dict]:
         rows = []

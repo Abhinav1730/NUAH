@@ -14,6 +14,23 @@ class RulesAgentSettings(BaseSettings):
     referer: str = Field(default="https://nuah.local", env="RULES_AGENT_REFERER")
     app_title: str = Field(default="NUAH Rules Agent", env="RULES_AGENT_APP_TITLE")
     dry_run: bool = Field(default=False)
+    cache_dir: Path = Field(
+        default=Path("./cache"),
+        description="Directory for caching API results.",
+        env="RULES_AGENT_CACHE_DIR",
+    )
+    cache_ttl_hours: int = Field(
+        default=2,
+        description="Cache time-to-live in hours.",
+    )
+    require_api_for_aggressive: bool = Field(
+        default=True,
+        description="Always call API for aggressive risk profiles.",
+    )
+    require_api_for_high_risk: bool = Field(
+        default=True,
+        description="Always call API when token risk_score > 0.7.",
+    )
 
     class Config:
         env_file = ".env"
@@ -22,6 +39,10 @@ class RulesAgentSettings(BaseSettings):
 
     @validator("data_dir", pre=True)
     def _expand(cls, value: Path) -> Path:
+        return Path(value).expanduser().resolve()
+
+    @validator("cache_dir", pre=True)
+    def _expand_cache_dir(cls, value: Path) -> Path:
         return Path(value).expanduser().resolve()
 
 
