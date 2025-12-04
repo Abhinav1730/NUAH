@@ -48,6 +48,23 @@ class NewsAgentSettings(BaseSettings):
         default=False,
         description="If true, skip OpenRouter calls and synthesize deterministic data.",
     )
+    cache_dir: Path = Field(
+        default=Path("./cache"),
+        description="Directory for caching API results.",
+        env="NEWS_AGENT_CACHE_DIR",
+    )
+    cache_ttl_hours: int = Field(
+        default=2,
+        description="Cache time-to-live in hours.",
+    )
+    momentum_change_threshold: float = Field(
+        default=0.10,
+        description="Minimum momentum change (%) to trigger API call (Strategy 1: Smart Caching).",
+    )
+    volume_spike_threshold: float = Field(
+        default=0.20,
+        description="Minimum volume spike (%) to trigger API call.",
+    )
 
     class Config:
         env_file = ".env"
@@ -56,6 +73,10 @@ class NewsAgentSettings(BaseSettings):
 
     @validator("data_dir", pre=True)
     def _expand_data_dir(cls, value: Path) -> Path:
+        return Path(value).expanduser().resolve()
+
+    @validator("cache_dir", pre=True)
+    def _expand_cache_dir(cls, value: Path) -> Path:
         return Path(value).expanduser().resolve()
 
 
