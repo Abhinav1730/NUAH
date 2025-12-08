@@ -18,3 +18,4 @@ class TradeState(TypedDict, total=False):
     errors: List[str]
     metadata: Dict[str, Any]
 
+

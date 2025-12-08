@@ -11,3 +11,15 @@ __pycache__/
 *.pyzwz
 *.pyzwzw
 *.pyzwzwz
+cache/
+data/
+logs/
+*.log
+*.log.*
+*.log.*.*
+*.log.*.*.*
+*.log.*.*.*.*
+*.log.*.*.*.*.*
+*.log.*.*.*.*.*.*
+*.log.*.*.*.*.*.*.*
+*.log.*.*.*.*.*.*.*.*

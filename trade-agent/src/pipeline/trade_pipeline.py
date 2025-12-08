@@ -5,11 +5,10 @@ import uuid
 from datetime import datetime, timezone
 from typing import Dict, Iterable, List, Optional
 
-from langgraph.graph import StateGraph, END
+from langgraph.graph import END, StateGraph
 
 from ..config import Settings
-from ..data_ingestion import SnapshotLoader, SQLiteDataLoader
-from ..data_ingestion.csv_loader import CSVDataLoader
+from ..data_ingestion import SQLiteDataLoader
 from ..execution import NDollarClient
 from ..graph import TradeState
 from ..logging import AuditLogger
@@ -21,14 +20,13 @@ logger = logging.getLogger(__name__)
 
 class TradePipeline:
     """
-    LangGraph-powered coordination layer that fuses multi-agent signals.
+    LangGraph-powered coordination layer that fuses multi-agent signals from SQLite
+    and executes trades via nuahchain-backend.
     """
 
     def __init__(self, settings: Settings):
         self.settings = settings
-        self.snapshot_loader = SnapshotLoader(settings.snapshot_dir)
         self.sqlite_loader = SQLiteDataLoader(settings.sqlite_path)
-        self.csv_loader = CSVDataLoader(settings.data_dir)
         self.rule_evaluator = RuleEvaluator()
         self.feature_engineer = FeatureEngineer()
         self.client = NDollarClient(settings.api_base_url, settings.api_token)
@@ -93,26 +91,31 @@ class TradePipeline:
 
     def _node_load_context(self, state: TradeState) -> TradeState:
         user_id = state["user_id"]
-        snapshot = self._load_snapshot(user_id)
+        snapshot = self.sqlite_loader.fetch_user_snapshot(user_id)
         if not snapshot:
             raise ValueError(f"No snapshot available for user {user_id}")
 
         tokens = self._extract_tokens(snapshot)
-        context_bundle = self.csv_loader.build_context(
-            user_id,
-            tokens,
-            news_freshness=self.settings.news_freshness_minutes,
-            trend_freshness=self.settings.trend_freshness_minutes,
+        news_signals = self.sqlite_loader.fetch_news_signals(
+            tokens, self.settings.news_freshness_minutes
         )
+        trend_signals = self.sqlite_loader.fetch_trend_signals(
+            tokens, self.settings.trend_freshness_minutes
+        )
+        rule_evaluations = self.sqlite_loader.fetch_rule_evaluations(user_id, tokens)
+        preferences = self.sqlite_loader.fetch_user_preferences(user_id) or {}
+        token_catalog = self.sqlite_loader.fetch_token_catalog(tokens)
+        time_series = self.sqlite_loader.fetch_time_series(tokens)
+
         context = {
             "tokens": tokens,
-            "news_signals": context_bundle.news_signals,
-            "trend_signals": context_bundle.trend_signals,
-            "rule_evaluations": context_bundle.rule_evaluations,
-            "preferences": context_bundle.user_preferences,
-            "token_catalog": context_bundle.token_catalog,
-            "time_series": context_bundle.time_series,
-            "historical_trades": context_bundle.historical_trades,
+            "news_signals": news_signals,
+            "trend_signals": trend_signals,
+            "rule_evaluations": rule_evaluations,
+            "preferences": preferences,
+            "token_catalog": token_catalog,
+            "time_series": time_series,
+            "historical_trades": snapshot.get("transactions", []),
         }
         errors: List[str] = []
         if self._snapshot_is_stale(snapshot):
@@ -135,7 +138,10 @@ class TradePipeline:
         deployable = max(0.0, portfolio_value * 0.25)
         preferences = context.get("preferences") or {}
         if preferences:
-            deployable = min(deployable, float(preferences.get("max_position_ndollar", deployable)))
+            deployable = min(
+                deployable,
+                float(preferences.get("max_position_ndollar", deployable)),
+            )
         trades_today = self._count_recent_trades(context.get("historical_trades", []))
         features = {
             "portfolio_value_ndollar": portfolio_value,
@@ -163,7 +169,11 @@ class TradePipeline:
         allowed_tokens = []
         for token in context["tokens"]:
             rule_row = next(
-                (row for row in context.get("rule_evaluations", []) if row["token_mint"] == token),
+                (
+                    row
+                    for row in context.get("rule_evaluations", [])
+                    if row["token_mint"] == token
+                ),
                 None,
             )
             if rule_row and not bool(rule_row.get("allowed", True)):
@@ -172,15 +182,28 @@ class TradePipeline:
                 {
                     "token_mint": token,
                     "max_position_ndollar": float(
-                        rule_row.get("max_position_ndollar", preferences.get("max_position_ndollar", features["deployable_ndollar"]))
+                        rule_row.get(
+                            "max_position_ndollar",
+                            preferences.get(
+                                "max_position_ndollar", features["deployable_ndollar"]
+                            ),
+                        )
                     )
                     if rule_row
-                    else float(preferences.get("max_position_ndollar", features["deployable_ndollar"])),
+                    else float(
+                        preferences.get(
+                            "max_position_ndollar", features["deployable_ndollar"]
+                        )
+                    ),
                     "max_daily_trades": int(
-                        rule_row.get("max_daily_trades", max_trades) if rule_row else max_trades
+                        rule_row.get("max_daily_trades", max_trades)
+                        if rule_row
+                        else max_trades
                     ),
                     "reason": rule_row.get("reason") if rule_row else "preferences",
-                    "confidence": float(rule_row.get("confidence", 0.7)) if rule_row else 0.5,
+                    "confidence": float(rule_row.get("confidence", 0.7))
+                    if rule_row
+                    else 0.5,
                 }
             )
 
@@ -197,7 +220,9 @@ class TradePipeline:
         news = state["context"].get("news_signals", [])
         if not news:
             return {"sentiment": {"score": 0.0, "confidence": 0.0, "sources": []}}
-        avg_score = sum(float(item.get("sentiment_score", 0)) for item in news) / len(news)
+        avg_score = sum(float(item.get("sentiment_score", 0)) for item in news) / len(
+            news
+        )
         avg_conf = sum(float(item.get("confidence", 0)) for item in news) / len(news)
         summary = [item.get("headline") for item in news[:3]]
         return {
@@ -322,6 +347,8 @@ class TradePipeline:
         if not decision:
             return {}
 
+        exec_resp: Optional[Dict] = None
+
         if decision.confidence < self.settings.decision_confidence_threshold:
             logger.info(
                 "Skipping execution for user %s due to low confidence %.2f",
@@ -351,9 +378,9 @@ class TradePipeline:
                 )
             else:
                 if decision.action == "buy":
-                    self.client.buy(decision.token_mint, decision.amount)
+                    exec_resp = self.client.buy(decision.token_mint, decision.amount)
                 else:
-                    self.client.sell(decision.token_mint, decision.amount)
+                    exec_resp = self.client.sell(decision.token_mint, decision.amount)
         else:
             logger.debug("No execution required for user %s", decision.user_id)
 
@@ -362,6 +389,31 @@ class TradePipeline:
             "timestamp": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
             "risk_score": (state.get("risk") or {}).get("max_amount"),
         }
+
+        try:
+            self.client.log_trade(
+                {
+                    "user_id": decision.user_id,
+                    "action": decision.action,
+                    "token_mint": decision.token_mint,
+                    "amount": decision.amount,
+                    "confidence": decision.confidence,
+                    "reason": decision.reason,
+                    "status": (exec_resp or {}).get("status")
+                    if not self.settings.dry_run
+                    else "SIMULATED",
+                    "tx_hash": (exec_resp or {}).get("tx_hash")
+                    if not self.settings.dry_run
+                    else None,
+                    "timestamp": metadata["timestamp"],
+                    "metadata": metadata,
+                }
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "Failed to log trade for user %s", decision.user_id, exc_info=True
+            )
+
         self.audit_logger.log(decision, metadata)
         return {}
 
@@ -370,12 +422,6 @@ class TradePipeline:
     def _discover_user_ids(self) -> Iterable[int]:
         rows = self.sqlite_loader.fetch_recent_users(limit=20)
         return [row["user_id"] for row in rows]
-
-    def _load_snapshot(self, user_id: int) -> Optional[Dict]:
-        record = self.snapshot_loader.load_json_snapshot(user_id)
-        if record:
-            return record.payload
-        return self.sqlite_loader.fetch_user_snapshot(user_id)
 
     @staticmethod
     def _extract_tokens(snapshot: Dict) -> List[str]:
@@ -396,16 +442,13 @@ class TradePipeline:
         return list(tokens)
 
     def _snapshot_is_stale(self, snapshot: Dict) -> bool:
-        fetched_at = snapshot.get("fetchedAt")
-        if not fetched_at:
-            fetched_at = (
-                (snapshot.get("profile") or {}).get("last_fetched_at")
-                or (snapshot.get("user") or {}).get("last_fetched_at")
-            )
+        fetched_at = snapshot.get("fetchedAt") or (snapshot.get("user") or {}).get(
+            "last_fetched_at"
+        )
         if not fetched_at:
             return False
         try:
-            ts = datetime.fromisoformat(fetched_at.replace("Z", "+00:00"))
+            ts = datetime.fromisoformat(str(fetched_at).replace("Z", "+00:00"))
         except ValueError:
             return False
         age = datetime.now(timezone.utc) - ts

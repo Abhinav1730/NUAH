@@ -4,7 +4,51 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Optional
 
-from pydantic import BaseSettings, Field, validator
+try:
+    from pydantic_settings import BaseSettings
+except ImportError:
+    from pydantic import BaseSettings
+
+from pydantic import Field
+
+# Handle both Pydantic v1 and v2 validator syntax
+# Try Pydantic v2 first (field_validator)
+_field_validator = None
+_validator = None
+
+try:
+    from pydantic import field_validator
+    _field_validator = field_validator
+except (ImportError, AttributeError):
+    pass
+
+# Try Pydantic v1 (validator)
+if _field_validator is None:
+    try:
+        from pydantic import validator
+        _validator = validator
+    except (ImportError, AttributeError):
+        pass
+
+# Create make_validator function based on what's available
+if _field_validator is not None:
+    # Pydantic v2
+    def make_validator(field_name, pre=True):
+        def decorator(func):
+            return _field_validator(field_name, mode="before" if pre else "after")(func)
+        return decorator
+elif _validator is not None:
+    # Pydantic v1 - allow reuse so repeated imports during tests don't error
+    def make_validator(field_name, pre=True):
+        def decorator(func):
+            return _validator(field_name, pre=pre, allow_reuse=True)(func)
+        return decorator
+else:
+    # Fallback - no validation (shouldn't happen, but safe)
+    def make_validator(field_name, pre=True):
+        def decorator(func):
+            return func
+        return decorator
 
 
 class TrendAgentSettings(BaseSettings):
@@ -36,19 +80,44 @@ class TrendAgentSettings(BaseSettings):
         default=0.20,
         description="Minimum volatility to trigger API call.",
     )
+    nuahchain_base_url: Optional[str] = Field(
+        default="http://localhost:8080",
+        description="Base URL for nuahchain-backend API.",
+        env="NUAHCHAIN_API_BASE_URL",
+    )
+    nuahchain_api_token: Optional[str] = Field(
+        default=None,
+        description="JWT token for nuahchain-backend API (optional, for authenticated requests).",
+        env="NUAHCHAIN_API_TOKEN",
+    )
+    use_real_data: bool = Field(
+        default=True,
+        description="If True, use real time-series data. If False, use CSV files only.",
+        env="TREND_AGENT_USE_REAL_DATA",
+    )
 
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
         extra = "ignore"
 
-    @validator("data_dir", pre=True)
-    def _expand(cls, value: Path) -> Path:
-        return Path(value).expanduser().resolve()
+    @make_validator("data_dir", pre=True)
+    @classmethod
+    def _expand(cls, value) -> Path:
+        if isinstance(value, str):
+            value = Path(value)
+        elif not isinstance(value, Path):
+            value = Path(str(value))
+        return value.expanduser().resolve()
 
-    @validator("cache_dir", pre=True)
-    def _expand_cache_dir(cls, value: Path) -> Path:
-        return Path(value).expanduser().resolve()
+    @make_validator("cache_dir", pre=True)
+    @classmethod
+    def _expand_cache_dir(cls, value) -> Path:
+        if isinstance(value, str):
+            value = Path(value)
+        elif not isinstance(value, Path):
+            value = Path(str(value))
+        return value.expanduser().resolve()
 
 
 @lru_cache(maxsize=1)

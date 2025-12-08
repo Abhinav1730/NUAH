@@ -1,278 +1,201 @@
 from __future__ import annotations
 
-import hashlib
-import json
+import csv
 import logging
-import uuid
+import sqlite3
 from datetime import datetime, timezone
-from typing import Dict, Iterable, List, Optional
+from pathlib import Path
+from typing import List, Dict, Optional
 
 import pandas as pd
 
-from .cache_manager import CacheManager
 from .config import RulesAgentSettings
-from .data_store import RulesDataStore
 from .deepseek_client import DeepSeekClient
 
 logger = logging.getLogger(__name__)
 
 
 class RulesAgentPipeline:
-    def __init__(self, settings: RulesAgentSettings):
+    """
+    Builds per-user rule evaluations by combining:
+      - token catalog + time-series from SQLite (fetch-data-agent DB)
+      - news signals (CSV)
+      - trend signals (CSV)
+      - rules.csv and user_preferences.csv
+    Delegates final allow/limits decision to DeepSeek.
+    """
+
+    def __init__(
+        self,
+        settings: RulesAgentSettings,
+        sqlite_path: Optional[Path] = None,
+        data_dir: Optional[Path] = None,
+    ) -> None:
         self.settings = settings
-        self.store = RulesDataStore(settings.data_dir)
+        self.sqlite_path = Path(sqlite_path or "../fetch-data-agent/data/user_data.db").resolve()
+        self.data_dir = Path(data_dir or settings.data_dir).resolve()
         self.client = DeepSeekClient(settings)
-        self.cache = CacheManager(settings.cache_dir, settings.cache_ttl_hours)
+        self._validate_sources()
 
-    def run(self) -> List[dict]:
-        rules = self.store.load_rules()
-        prefs = self.store.load_user_preferences()
-        catalog = self.store.load_token_catalog()
-        if prefs.empty:
-            logger.warning("No user preferences available; skipping rules evaluation.")
-            return []
+    def run(self) -> List[Dict]:
+        catalog, ts = self._load_sqlite_frames()
+        rules_df, prefs_df = self._load_rules_and_prefs()
+        news_df = self._load_csv_optional("news_signals.csv")
+        trend_df = self._load_csv_optional("trend_signals.csv")
 
+        evaluations: List[Dict] = []
         iso_now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-        evaluations: List[dict] = []
-        for _, pref in prefs.iterrows():
-            user_context = self._build_user_context(pref, catalog)
-            if not user_context["tokens"]:
+
+        for _, pref in prefs_df.iterrows():
+            user_id = int(pref["user_id"])
+            allowed_tokens = self._parse_tokens(pref.get("allowed_tokens", ""))
+            blocked_tokens = set(self._parse_tokens(pref.get("blocked_tokens", "")))
+
+            # Build token contexts for this user
+            token_contexts = []
+            for token in allowed_tokens:
+                if token in blocked_tokens:
+                    continue
+                token_row = catalog[catalog["token_mint"] == token].iloc[0] if not catalog.empty and token in catalog["token_mint"].values else None
+                ts_rows = ts[ts["token_mint"] == token].sort_values("timestamp")
+                news_rows = news_df[news_df["token_mint"] == token] if news_df is not None else pd.DataFrame()
+                trend_rows = trend_df[trend_df["token_mint"] == token] if trend_df is not None else pd.DataFrame()
+
+                token_contexts.append(
+                    {
+                        "token_mint": token,
+                        "risk_score": float(token_row["risk_score"]) if token_row is not None else 0.5,
+                        "liquidity_score": float(token_row["liquidity_score"]) if token_row is not None else 0.5,
+                        "volatility_score": float(token_row["volatility_score"]) if token_row is not None else 0.5,
+                        "momentum": float(ts_rows["momentum"].iloc[-1]) if not ts_rows.empty and "momentum" in ts_rows.columns else 0.0,
+                        "news_sentiment": float(news_rows["sentiment_score"].iloc[-1]) if not news_rows.empty and "sentiment_score" in news_rows.columns else 0.0,
+                        "trend_score": float(trend_rows["trend_score"].iloc[-1]) if not trend_rows.empty and "trend_score" in trend_rows.columns else 0.0,
+                    }
+                )
+
+            if not token_contexts:
+                logger.warning("No tokens to evaluate for user %s", user_id)
                 continue
-            rows = self._evaluate_user(rules, user_context, iso_now)
-            evaluations.extend(rows)
+
+            prompt = self._build_prompt(pref, token_contexts)
+            decisions = self.client.structured_completion(*prompt)
+            if not decisions:
+                logger.warning("LLM returned no decisions for user %s", user_id)
+                continue
+
+            for dec in decisions:
+                token = dec.get("token_mint")
+                if not token or token not in allowed_tokens or token in blocked_tokens:
+                    continue
+                evaluations.append(
+                    {
+                        "evaluation_id": dec.get("evaluation_id") or f"RULE-{user_id}-{token}",
+                        "timestamp": iso_now,
+                        "user_id": user_id,
+                        "token_mint": token,
+                        "allowed": bool(dec.get("allowed", True)),
+                        "max_daily_trades": int(dec.get("max_daily_trades", pref.get("max_trades_per_day", 3))),
+                        "max_position_ndollar": float(dec.get("max_position_ndollar", pref.get("max_position_ndollar", 1000))),
+                        "reason": dec.get("reason", "LLM evaluation"),
+                        "confidence": float(dec.get("confidence", 0.7)),
+                    }
+                )
 
         if evaluations:
-            self.store.write_evaluations(evaluations)
-            logger.info("Saved %d rule evaluations.", len(evaluations))
+            self._write_evaluations(evaluations)
         else:
             logger.warning("No rule evaluations generated.")
         return evaluations
 
-    def _build_user_context(self, pref_row, catalog: pd.DataFrame) -> Dict:
-        allowed_tokens = (
-            str(pref_row.get("allowed_tokens", "")).split("|")
-            if pref_row.get("allowed_tokens")
-            else []
-        )
-        blocked_tokens = set(
-            filter(None, str(pref_row.get("blocked_tokens", "")).split("|"))
-        )
-        tokens = []
-        for token in allowed_tokens:
-            if token in blocked_tokens:
-                continue
-            catalog_row = (
-                catalog[catalog["token_mint"] == token].iloc[0]
-                if not catalog.empty
-                else None
-            )
-            tokens.append(
-                {
-                    "token_mint": token,
-                    "risk_score": float(
-                        catalog_row["risk_score"] if catalog_row is not None else 0.5
-                    ),
-                    "liquidity_score": float(
-                        catalog_row["liquidity_score"] if catalog_row is not None else 0.5
-                    ),
-                }
-            )
-        return {
-            "user_id": int(pref_row["user_id"]),
-            "risk_profile": pref_row.get("risk_profile", "balanced"),
-            "max_trades_per_day": int(pref_row.get("max_trades_per_day", 3)),
-            "max_position_ndollar": float(pref_row.get("max_position_ndollar", 1000)),
-            "tokens": tokens,
-        }
-
-    def _evaluate_user(self, rules: pd.DataFrame, context: Dict, iso_now: str) -> List[dict]:
-        if self.settings.dry_run or not self.settings.openrouter_api_key:
-            return self._fallback(context, iso_now)
-
-        # Generate cache key based on user_id, rules hash, and token list
-        rules_hash = self._hash_rules(rules)
-        tokens_hash = self._hash_tokens(context["tokens"])
-        cache_key = f"rules_user_{context['user_id']}_rules_{rules_hash}_tokens_{tokens_hash}"
-
-        # Check cache
-        cached = self.cache.load_cache(cache_key)
-
-        # Check if we need to call API (Strategy 1: Smart Caching)
-        should_call_api = self._should_call_api(context, cached, rules)
-
-        if should_call_api:
-            logger.info(
-                f"Calling API for user {context['user_id']} "
-                f"(change detected, high risk, or cache expired)"
-            )
-            evaluations = self._evaluate_user_via_api(rules, context, iso_now)
-            if evaluations:
-                # Cache the result
-                self.cache.save_cache(
-                    cache_key,
-                    evaluations,
-                    metadata={
-                        "user_id": context["user_id"],
-                        "risk_profile": context["risk_profile"],
-                        "rules_hash": rules_hash,
-                        "tokens_hash": tokens_hash,
-                    },
-                )
-                return evaluations
-            else:
-                # API failed, use fallback
-                return self._fallback(context, iso_now)
-        else:
-            # Use cached result
-            if cached and cached.get("data"):
-                cached_evaluations = cached["data"]
-                # Update timestamps
-                for eval_item in cached_evaluations:
-                    eval_item["timestamp"] = iso_now
-                logger.debug(f"Using cached evaluations for user {context['user_id']}")
-                return cached_evaluations
-            else:
-                # No cache, use fallback
-                return self._fallback(context, iso_now)
-
-    def _evaluate_user_via_api(
-        self, rules: pd.DataFrame, context: Dict, iso_now: str
-    ) -> List[dict]:
-        """Evaluate user rules via API call."""
-        rule_text = "\n".join(
-            f"- {row['rule_id']}: {row['description']} ({row['param']}={row['value']})"
-            for _, row in rules.iterrows()
-        )
-        token_text = "\n".join(
-            f"{token['token_mint']} risk={token['risk_score']:.2f} "
-            f"liquidity={token['liquidity_score']:.2f}"
-            for token in context["tokens"]
-        )
+    # ------------------------------------------------------------------ helpers
+    def _build_prompt(self, pref_row, token_contexts: List[Dict]) -> tuple[str, str]:
         system_prompt = (
-            "You translate risk rules into executable policy. "
-            "Return JSON array with fields: token_mint, allowed (bool), "
-            "max_daily_trades, max_position_ndollar, reason, confidence."
+            "You are a risk-policy translator. Given user preferences and token analytics, "
+            "decide per token: allowed (bool), max_daily_trades, max_position_ndollar, reason, confidence (0..1). "
+            "Respond with JSON array."
         )
-        user_prompt = f"""
-User risk profile: {context['risk_profile']}
-User max trades/day: {context['max_trades_per_day']}
-User max position (ndollar): {context['max_position_ndollar']}
+        pref_text = (
+            f"user_id={pref_row['user_id']}, "
+            f"risk_profile={pref_row.get('risk_profile','balanced')}, "
+            f"max_trades_per_day={pref_row.get('max_trades_per_day',3)}, "
+            f"max_position_ndollar={pref_row.get('max_position_ndollar',1000)}"
+        )
+        user_prompt = (
+            f"User preferences: {pref_text}\n"
+            f"Tokens with metrics:\n{json.dumps(token_contexts, ensure_ascii=False, indent=2)}"
+        )
+        return system_prompt, user_prompt
 
-Rules:
-{rule_text}
+    def _write_evaluations(self, rows: List[Dict]) -> None:
+        path = self.data_dir / "rule_evaluations.csv"
+        fields = [
+            "evaluation_id",
+            "timestamp",
+            "user_id",
+            "token_mint",
+            "allowed",
+            "max_daily_trades",
+            "max_position_ndollar",
+            "reason",
+            "confidence",
+        ]
+        write_header = not path.exists() or path.stat().st_size == 0
+        with path.open("a", encoding="utf-8", newline="") as fp:
+            writer = csv.DictWriter(fp, fieldnames=fields)
+            if write_header:
+                writer.writeheader()
+            for row in rows:
+                writer.writerow(row)
 
-Tokens:
-{token_text}
-"""
-        records = self.client.structured_completion(system_prompt, user_prompt)
-        if not records:
-            return []
-
-        evaluations = []
-        for entry in records:
-            token = entry.get("token_mint")
-            if not token:
-                continue
-            evaluations.append(
-                {
-                    "evaluation_id": entry.get("evaluation_id")
-                    or f"RULE-{uuid.uuid4().hex[:8]}",
-                    "timestamp": iso_now,
-                    "user_id": context["user_id"],
-                    "token_mint": token,
-                    "allowed": bool(entry.get("allowed", True)),
-                    "max_daily_trades": int(
-                        entry.get("max_daily_trades", context["max_trades_per_day"])
-                    ),
-                    "max_position_ndollar": float(
-                        entry.get(
-                            "max_position_ndollar", context["max_position_ndollar"]
-                        )
-                    ),
-                    "reason": entry.get("reason", "DeepSeek evaluation"),
-                    "confidence": float(entry.get("confidence", 0.7)),
-                }
-            )
-        return evaluations
-
-    def _should_call_api(
-        self, context: Dict, cached: Optional[dict], rules: pd.DataFrame
-    ) -> bool:
-        """
-        Determine if API call is needed based on change detection (Strategy 1).
-        
-        Returns True if:
-        1. No cache exists
-        2. Cache expired (> TTL hours)
-        3. User has aggressive risk profile (if require_api_for_aggressive=True)
-        4. Any token has risk_score > 0.7 (if require_api_for_high_risk=True)
-        """
-        if not cached:
-            return True  # No cache, need to call
-
-        # Check for aggressive risk profile
-        if (
-            self.settings.require_api_for_aggressive
-            and context.get("risk_profile") == "aggressive"
-        ):
-            logger.info(
-                f"Aggressive risk profile for user {context['user_id']}, calling API"
-            )
-            return True
-
-        # Check for high-risk tokens
-        if self.settings.require_api_for_high_risk:
-            high_risk_tokens = [
-                t for t in context["tokens"] if t.get("risk_score", 0) > 0.7
-            ]
-            if high_risk_tokens:
-                logger.info(
-                    f"High-risk tokens detected for user {context['user_id']}, calling API"
+    def _load_sqlite_frames(self) -> tuple[pd.DataFrame, pd.DataFrame]:
+        with sqlite3.connect(self.sqlite_path) as conn:
+            try:
+                ts = pd.read_sql_query(
+                    "SELECT token_mint, timestamp, momentum, volatility FROM time_series",
+                    conn,
                 )
-                return True
+            except Exception as e:  # noqa: BLE001
+                logger.error("Failed to read time_series: %s", e)
+                ts = pd.DataFrame()
 
-        # No significant change, use cache
-        return False
+            try:
+                catalog = pd.read_sql_query(
+                    "SELECT token_mint, name, symbol, bonding_curve_phase, risk_score, "
+                    "liquidity_score, volatility_score, whale_concentration, last_updated "
+                    "FROM token_strategy_catalog",
+                    conn,
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.error("Failed to read token_strategy_catalog: %s", e)
+                catalog = pd.DataFrame()
+
+        if not ts.empty and "timestamp" in ts.columns:
+            ts["timestamp"] = pd.to_datetime(ts["timestamp"], utc=True, errors="coerce")
+            ts = ts.dropna(subset=["timestamp"])
+        return catalog, ts
+
+    def _load_rules_and_prefs(self) -> tuple[pd.DataFrame, pd.DataFrame]:
+        rules_path = self.data_dir / "rules.csv"
+        prefs_path = self.data_dir / "user_preferences.csv"
+        if not rules_path.exists() or not prefs_path.exists():
+            raise FileNotFoundError("rules.csv or user_preferences.csv missing in data_dir.")
+        rules_df = pd.read_csv(rules_path)
+        prefs_df = pd.read_csv(prefs_path)
+        return rules_df, prefs_df
+
+    def _load_csv_optional(self, name: str) -> Optional[pd.DataFrame]:
+        path = self.data_dir / name
+        if not path.exists():
+            return None
+        try:
+            return pd.read_csv(path)
+        except Exception as e:  # noqa: BLE001
+            logger.error("Failed to read %s: %s", name, e)
+            return None
 
     @staticmethod
-    def _hash_rules(rules: pd.DataFrame) -> str:
-        """Generate hash of rules for cache key."""
-        if rules.empty:
-            return "empty"
-        rules_str = json.dumps(
-            rules[["rule_id", "param", "value"]].to_dict("records"), sort_keys=True
-        )
-        return hashlib.md5(rules_str.encode()).hexdigest()[:8]
-
-    @staticmethod
-    def _hash_tokens(tokens: List[Dict]) -> str:
-        """Generate hash of token list for cache key."""
-        if not tokens:
-            return "empty"
-        tokens_str = json.dumps(
-            sorted([t["token_mint"] for t in tokens]), sort_keys=True
-        )
-        return hashlib.md5(tokens_str.encode()).hexdigest()[:8]
-
-    def _fallback(self, context: Dict, iso_now: str) -> List[dict]:
-        rows = []
-        for token in context["tokens"]:
-            allowed = token["risk_score"] < 0.7
-            rows.append(
-                {
-                    "evaluation_id": f"RULE-FALLBACK-{context['user_id']}-{token['token_mint']}",
-                    "timestamp": iso_now,
-                    "user_id": context["user_id"],
-                    "token_mint": token["token_mint"],
-                    "allowed": allowed,
-                    "max_daily_trades": context["max_trades_per_day"]
-                    if allowed
-                    else max(1, context["max_trades_per_day"] - 2),
-                    "max_position_ndollar": context["max_position_ndollar"]
-                    * (0.5 if not allowed else 1.0),
-                    "reason": "Heuristic fallback without DeepSeek.",
-                    "confidence": 0.55,
-                }
-            )
-        return rows
+    def _parse_tokens(value: str) -> List[str]:
+        if not value:
+            return []
+        return [t.strip() for t in str(value).split("|") if t.strip()]
 

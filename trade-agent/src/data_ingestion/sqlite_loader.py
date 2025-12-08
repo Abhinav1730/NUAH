@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -76,6 +77,94 @@ class SQLiteDataLoader:
             else None,
         }
         return snapshot_data
+
+    def fetch_news_signals(
+        self, token_filter: Optional[List[str]] = None, freshness_minutes: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
+        sql = "SELECT * FROM news_signals"
+        params: List[Any] = []
+        clauses = []
+        if token_filter:
+            clauses.append(f"token_mint IN ({','.join(['?']*len(token_filter))})")
+            params.extend(token_filter)
+        if freshness_minutes:
+            cutoff = datetime.now(timezone.utc) - timedelta(minutes=freshness_minutes)
+            clauses.append("timestamp >= ?")
+            params.append(cutoff.isoformat())
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY timestamp DESC"
+        with self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [dict(row) for row in rows]
+
+    def fetch_trend_signals(
+        self, token_filter: Optional[List[str]] = None, freshness_minutes: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
+        sql = "SELECT * FROM trend_signals"
+        params: List[Any] = []
+        clauses = []
+        if token_filter:
+            clauses.append(f"token_mint IN ({','.join(['?']*len(token_filter))})")
+            params.extend(token_filter)
+        if freshness_minutes:
+            cutoff = datetime.now(timezone.utc) - timedelta(minutes=freshness_minutes)
+            clauses.append("timestamp >= ?")
+            params.append(cutoff.isoformat())
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY timestamp DESC"
+        with self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [dict(row) for row in rows]
+
+    def fetch_rule_evaluations(self, user_id: int, token_filter: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+        sql = "SELECT * FROM rule_evaluations WHERE user_id = ?"
+        params: List[Any] = [user_id]
+        if token_filter:
+            sql += f" AND token_mint IN ({','.join(['?']*len(token_filter))})"
+            params.extend(token_filter)
+        with self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [dict(row) for row in rows]
+
+    def fetch_user_preferences(self, user_id: int) -> Optional[Dict[str, Any]]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM user_preferences WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def fetch_token_catalog(self, token_filter: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+        sql = "SELECT * FROM token_strategy_catalog"
+        params: List[Any] = []
+        if token_filter:
+            sql += f" WHERE token_mint IN ({','.join(['?']*len(token_filter))})"
+            params.extend(token_filter)
+        with self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [dict(row) for row in rows]
+
+    def fetch_time_series(self, token_filter: Optional[List[str]] = None, limit_per_token: int = 100) -> List[Dict[str, Any]]:
+        sql = "SELECT token_mint, timestamp, open, high, low, close, volume, momentum, volatility FROM time_series"
+        params: List[Any] = []
+        if token_filter:
+            sql += f" WHERE token_mint IN ({','.join(['?']*len(token_filter))})"
+            params.extend(token_filter)
+        sql += " ORDER BY token_mint, timestamp DESC"
+        with self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        if limit_per_token and rows:
+            limited: List[Dict[str, Any]] = []
+            counts: Dict[str, int] = {}
+            for row in rows:
+                token = row["token_mint"]
+                counts[token] = counts.get(token, 0) + 1
+                if counts[token] <= limit_per_token:
+                    limited.append(dict(row))
+            return limited
+        return [dict(r) for r in rows]
 
     def latest_snapshot_timestamp(self) -> Optional[str]:
         with self._connect() as conn:

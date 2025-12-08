@@ -1,5 +1,4 @@
 token_mint,name,symbol,bonding_curve_phase,risk_score,creator_reputation,liquidity_score,volatility_score,whale_concentration,last_updated
-MintAlpha123,Chronos AI,CHRO,early,0.68,0.72,0.55,0.61,0.32,2025-12-04T09:00:00Z
-MintBeta456,Solana Forge,SFRG,mid,0.42,0.81,0.73,0.48,0.27,2025-12-04T09:00:00Z
-MintGamma789,Lunar Labs,LUNR,late,0.29,0.65,0.84,0.77,0.41,2025-12-04T09:00:00Z
-
+MintAlpha123,Alpha Token,ALPHA,mid,0.45,0.8,0.75,0.5,0.3,2025-12-07T13:18:04.645215+00:00
+MintBeta456,Beta Token,BETA,early,0.65,0.6,0.6,0.7,0.4,2025-12-07T13:18:04.645215+00:00
+MintGamma789,Gamma Token,GAMMA,late,0.35,0.9,0.85,0.4,0.2,2025-12-07T13:18:04.645215+00:00

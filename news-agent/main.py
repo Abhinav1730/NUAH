@@ -5,7 +5,7 @@ from typing import List, Optional
 
 import typer
 
-from src.config import NewsAgentSettings, get_settings
+from src.config import get_settings
 from src.pipeline import NewsAgentPipeline
 
 logging.basicConfig(
@@ -21,17 +21,11 @@ def run(
     tokens: Optional[List[str]] = typer.Argument(
         None, help="Optional list of token mint addresses to analyze."
     ),
-    dry_run: bool = typer.Option(
-        False,
-        "--dry-run",
-        help="Skip OpenRouter calls and synthesize deterministic outputs.",
-    ),
 ) -> None:
     settings = get_settings()
-    if dry_run:
-        settings = settings.model_copy(update={"dry_run": True})
     pipeline = NewsAgentPipeline(settings)
-    pipeline.run(tokens)
+    signals = pipeline.run(tokens)
+    logging.info("Completed run; signals generated: %d", len(signals))
 
 
 if __name__ == "__main__":

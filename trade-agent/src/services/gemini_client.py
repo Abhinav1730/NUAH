@@ -62,3 +62,4 @@ class GeminiDecisionClient:
             logger.error("Gemini response was not valid JSON: %s", text)
             return None
 
+

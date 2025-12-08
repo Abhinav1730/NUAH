@@ -67,3 +67,4 @@ def fallback_signals(contexts: Iterable[TrendContext], iso_now: str) -> List[dic
         )
     return signals
 
+
