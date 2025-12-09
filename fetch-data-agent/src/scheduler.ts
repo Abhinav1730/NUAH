@@ -9,7 +9,7 @@ export class Scheduler {
 
   constructor(userDataService: UserDataService) {
     this.userDataService = userDataService;
-    this.intervalMinutes = parseInt(process.env.FETCH_INTERVAL_MINUTES || '20', 10);
+    this.intervalMinutes = parseInt(process.env.FETCH_INTERVAL_MINUTES || '30', 10);
   }
 
   /**

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Dict, Iterable, List, Optional
@@ -30,7 +31,7 @@ class TradePipeline:
         self.rule_evaluator = RuleEvaluator()
         self.feature_engineer = FeatureEngineer()
         self.client = NDollarClient(settings.api_base_url, settings.api_token)
-        self.audit_logger = AuditLogger(settings.data_dir)
+        self.audit_logger = AuditLogger(settings.sqlite_path)
         self.gemini_client = GeminiDecisionClient(
             settings.gemini_api_key, settings.gemini_model
         )
@@ -39,29 +40,87 @@ class TradePipeline:
         )
         self.graph = self._build_graph()
 
-    def run(self, user_ids: Optional[Iterable[int]] = None) -> None:
+    def run(self, user_ids: Optional[Iterable[int]] = None) -> Dict[str, int]:
+        """
+        Process users through the trade pipeline.
+        
+        Args:
+            user_ids: Optional list of specific user IDs to process.
+                     If None, discovers and processes ALL users in batches.
+        
+        Returns:
+            Dict with processing stats: total, processed, failed, skipped
+        """
         user_ids = list(user_ids or self._discover_user_ids())
         if not user_ids:
             logger.warning("No users discovered to process.")
-            return
-        logger.info("Processing %d user(s)", len(user_ids))
+            return {"total": 0, "processed": 0, "failed": 0, "skipped": 0}
+        
+        total_users = len(user_ids)
+        batch_size = self.settings.batch_size
+        batch_delay = self.settings.batch_delay_seconds
+        
+        # Stats tracking
+        stats = {"total": total_users, "processed": 0, "failed": 0, "skipped": 0}
+        
+        # If batch_size is 0 or negative, process all at once (no batching)
+        if batch_size <= 0:
+            batch_size = total_users
+        
+        num_batches = (total_users + batch_size - 1) // batch_size  # Ceiling division
+        
+        logger.info(
+            "Processing %d user(s) in %d batch(es) of %d",
+            total_users, num_batches, batch_size
+        )
 
-        for user_id in user_ids:
-            try:
-                result = self.graph.invoke({"user_id": user_id})
-                decision = result.get("decision")
-                if decision:
-                    logger.info(
-                        "User %s decision: %s token=%s amount=%s conf=%.2f reason=%s",
-                        user_id,
-                        decision.action,
-                        decision.token_mint,
-                        decision.amount,
-                        decision.confidence,
-                        decision.reason,
-                    )
-            except Exception:  # noqa: BLE001
-                logger.exception("Trade pipeline failed for user %s", user_id)
+        for batch_num in range(num_batches):
+            start_idx = batch_num * batch_size
+            end_idx = min(start_idx + batch_size, total_users)
+            batch = user_ids[start_idx:end_idx]
+            
+            logger.info(
+                "📦 Batch %d/%d: Processing users %d-%d (%d users)",
+                batch_num + 1, num_batches, start_idx + 1, end_idx, len(batch)
+            )
+            
+            for user_id in batch:
+                try:
+                    result = self.graph.invoke({"user_id": user_id})
+                    decision = result.get("decision")
+                    if decision:
+                        logger.info(
+                            "User %s decision: %s token=%s amount=%s conf=%.2f reason=%s",
+                            user_id,
+                            decision.action,
+                            decision.token_mint,
+                            decision.amount,
+                            decision.confidence,
+                            decision.reason,
+                        )
+                        if decision.action == "hold":
+                            stats["skipped"] += 1
+                        else:
+                            stats["processed"] += 1
+                    else:
+                        stats["skipped"] += 1
+                except Exception:  # noqa: BLE001
+                    logger.exception("Trade pipeline failed for user %s", user_id)
+                    stats["failed"] += 1
+            
+            # Delay between batches (except after the last batch)
+            if batch_num < num_batches - 1 and batch_delay > 0:
+                logger.info(
+                    "⏳ Batch %d complete. Waiting %d seconds before next batch...",
+                    batch_num + 1, batch_delay
+                )
+                time.sleep(batch_delay)
+        
+        logger.info(
+            "✅ Pipeline complete: %d total, %d processed, %d skipped, %d failed",
+            stats["total"], stats["processed"], stats["skipped"], stats["failed"]
+        )
+        return stats
 
     # --- LangGraph assembly -------------------------------------------------
 
@@ -390,6 +449,22 @@ class TradePipeline:
             "risk_score": (state.get("risk") or {}).get("max_amount"),
         }
 
+        # Determine execution status
+        tx_hash = None
+        exec_status = "skipped"
+        error_message = None
+
+        if decision.action == "hold":
+            exec_status = "skipped"
+        elif self.settings.dry_run or not self.settings.api_token:
+            exec_status = "simulated"
+        elif exec_resp:
+            exec_status = (exec_resp.get("status") or "completed").lower()
+            tx_hash = exec_resp.get("tx_hash")
+            if exec_resp.get("error"):
+                error_message = exec_resp.get("error")
+                exec_status = "failed"
+
         try:
             self.client.log_trade(
                 {
@@ -399,29 +474,38 @@ class TradePipeline:
                     "amount": decision.amount,
                     "confidence": decision.confidence,
                     "reason": decision.reason,
-                    "status": (exec_resp or {}).get("status")
-                    if not self.settings.dry_run
-                    else "SIMULATED",
-                    "tx_hash": (exec_resp or {}).get("tx_hash")
-                    if not self.settings.dry_run
-                    else None,
+                    "status": exec_status.upper(),
+                    "tx_hash": tx_hash,
                     "timestamp": metadata["timestamp"],
                     "metadata": metadata,
                 }
             )
         except Exception:  # noqa: BLE001
             logger.warning(
-                "Failed to log trade for user %s", decision.user_id, exc_info=True
+                "Failed to log trade to backend for user %s", decision.user_id, exc_info=True
             )
 
-        self.audit_logger.log(decision, metadata)
+        # Log to SQLite database
+        self.audit_logger.log(
+            decision,
+            metadata,
+            status=exec_status,
+            tx_hash=tx_hash,
+            error_message=error_message,
+        )
         return {}
 
     # --- Helpers ------------------------------------------------------------
 
-    def _discover_user_ids(self) -> Iterable[int]:
-        rows = self.sqlite_loader.fetch_recent_users(limit=20)
-        return [row["user_id"] for row in rows]
+    def _discover_user_ids(self) -> List[int]:
+        """
+        Discover ALL users from the database.
+        No limit - processes every user in the system.
+        """
+        rows = self.sqlite_loader.fetch_recent_users(limit=None)  # Fetch ALL users
+        user_ids = [row["user_id"] for row in rows]
+        logger.info("Discovered %d users in database", len(user_ids))
+        return user_ids
 
     @staticmethod
     def _extract_tokens(snapshot: Dict) -> List[str]:
@@ -448,7 +532,11 @@ class TradePipeline:
         if not fetched_at:
             return False
         try:
-            ts = datetime.fromisoformat(str(fetched_at).replace("Z", "+00:00"))
+            ts_str = str(fetched_at).replace("Z", "+00:00")
+            ts = datetime.fromisoformat(ts_str)
+            # Make timezone-aware if naive
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
         except ValueError:
             return False
         age = datetime.now(timezone.utc) - ts
@@ -466,6 +554,9 @@ class TradePipeline:
                 continue
             try:
                 ts = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
+                # Make timezone-aware if naive
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
             except ValueError:
                 continue
             if (now - ts).total_seconds() <= 24 * 3600:

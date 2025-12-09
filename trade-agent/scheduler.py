@@ -25,7 +25,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--interval-minutes",
         type=int,
-        default=int(getattr(get_settings(), "trade_interval_minutes", 30)),
+        default=int(getattr(get_settings(), "trade_interval_minutes", 40)),
         help="Minutes between trade-agent runs (default: 30).",
     )
     parser.add_argument(

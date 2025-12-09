@@ -109,10 +109,49 @@ export const createSchema = async (db: Database): Promise<void> => {
     )
   `);
 
+  // Trade executions table - stores all trade decisions from trade-agent
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS trade_executions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      trade_id TEXT UNIQUE NOT NULL,
+      user_id INTEGER NOT NULL,
+      token_mint TEXT,
+      action TEXT NOT NULL,
+      amount TEXT,
+      price TEXT,
+      timestamp TIMESTAMP NOT NULL,
+      pnl TEXT,
+      slippage TEXT,
+      risk_score REAL,
+      confidence REAL,
+      reason TEXT,
+      status TEXT DEFAULT 'completed',
+      tx_hash TEXT,
+      error_message TEXT,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+    )
+  `);
+
   // Create indexes for better query performance
   await db.exec(`
     CREATE INDEX IF NOT EXISTS idx_user_balances_user_token 
     ON user_balances(user_id, token_mint)
+  `);
+
+  await db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_trade_executions_user_id 
+    ON trade_executions(user_id)
+  `);
+
+  await db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_trade_executions_timestamp 
+    ON trade_executions(timestamp)
+  `);
+
+  await db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_trade_executions_token 
+    ON trade_executions(token_mint)
   `);
 
   await db.exec(`

@@ -85,6 +85,16 @@ class Settings(BaseSettings):
     trend_freshness_minutes: int = Field(default=60)
     snapshot_freshness_minutes: int = Field(default=30)
     dry_run: bool = Field(default=False)
+    
+    # Batch processing settings
+    batch_size: int = Field(
+        default=50,
+        description="Number of users to process per batch. Set to 0 for no batching.",
+    )
+    batch_delay_seconds: int = Field(
+        default=5,
+        description="Seconds to wait between batches to avoid overloading.",
+    )
     gemini_api_key: Optional[str] = Field(
         default=None, description="Google Gemini API key for final decision fusion."
     )

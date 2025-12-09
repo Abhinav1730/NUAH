@@ -360,20 +360,74 @@ The `denom_mapper.py` in `shared/` handles these conversions.
 1. **nuahchain-backend running** on localhost:8080
 2. **PostgreSQL** with database `serverdb`
 3. **JWT Token** for authentication
+4. **Python** installed with agent dependencies
 
-### Start Commands
+### Start Commands (All Agents with Schedulers)
+
+Each agent has its own scheduler. Start each in a separate terminal:
 
 ```powershell
 # Terminal 1: Start nuahchain-backend
 cd C:\Users\Abhinav Saxena\Desktop\nuahchain-backend
 ./build/server.exe
 
-# Terminal 2: Run fetch-data-agent (populates SQLite)
+# Terminal 2: fetch-data-agent (fetches every 30 min)
 cd C:\Users\Abhinav Saxena\Desktop\NUAH\fetch-data-agent
 $env:NUAHCHAIN_API_TOKEN="your_jwt_token"
 npm run dev
 
-# Terminal 3: Run trade-agent (makes decisions)
+# Terminal 3: news-agent (runs every 35 min)
+cd C:\Users\Abhinav Saxena\Desktop\NUAH\news-agent
+python scheduler.py
+
+# Terminal 4: trend-agent (runs every 35 min)
+cd C:\Users\Abhinav Saxena\Desktop\NUAH\trend-agent
+python scheduler.py
+
+# Terminal 5: rules-agent (runs every 40 min)
+cd C:\Users\Abhinav Saxena\Desktop\NUAH\rules-agent
+python scheduler.py
+
+# Terminal 6: trade-agent (runs every 40 min)
+cd C:\Users\Abhinav Saxena\Desktop\NUAH\trade-agent
+$env:API_TOKEN="your_jwt_token"
+$env:DRY_RUN="true"
+python scheduler.py
+```
+
+### Agent Schedule Intervals
+
+| Agent | Interval | Purpose |
+|-------|----------|---------|
+| fetch-data-agent | 30 min | Fetches user data from nuahchain-backend |
+| news-agent | 35 min | Analyzes news sentiment |
+| trend-agent | 35 min | Analyzes price trends |
+| rules-agent | 40 min | Evaluates trading rules |
+| trade-agent | 40 min | Makes and executes trade decisions |
+
+### Run Once (Testing)
+
+To run each agent once for testing:
+
+```powershell
+# fetch-data-agent - run once
+cd C:\Users\Abhinav Saxena\Desktop\NUAH\fetch-data-agent
+$env:NUAHCHAIN_API_TOKEN="your_jwt_token"
+npx ts-node src/index.ts --run-now
+
+# news-agent - run once
+cd C:\Users\Abhinav Saxena\Desktop\NUAH\news-agent
+python scheduler.py --run-once
+
+# trend-agent - run once
+cd C:\Users\Abhinav Saxena\Desktop\NUAH\trend-agent
+python scheduler.py --run-once
+
+# rules-agent - run once
+cd C:\Users\Abhinav Saxena\Desktop\NUAH\rules-agent
+python scheduler.py --run-once
+
+# trade-agent - run once
 cd C:\Users\Abhinav Saxena\Desktop\NUAH\trade-agent
 $env:API_TOKEN="your_jwt_token"
 $env:DRY_RUN="true"
