@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>P&L Graph - NUAH Trading Dashboard</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>📈</text></svg>">
+    <!-- Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header class="header">
+            <div class="logo">
+                <div class="logo-icon">N</div>
+                <div class="logo-text">
+                    <h1>NUAH</h1>
+                    <span>P&L Graphs</span>
+                </div>
+            </div>
+            <nav class="nav">
+                <a href="/" class="nav-link">Dashboard</a>
+                <a href="/graph.html" class="nav-link active">Graph</a>
+                <a href="/chart.html" class="nav-link">Charts</a>
+            </nav>
+        </header>
+
+        <!-- Summary Stats -->
+        <section class="grid grid-3 mb-lg">
+            <div class="card stat-card">
+                <div class="card-header">
+                    <span class="card-title">Today's P&L</span>
+                </div>
+                <div class="stat-value" id="total-pnl">$0.00</div>
+                <div class="stat-label" id="current-time">-</div>
+            </div>
+
+            <div class="card stat-card">
+                <div class="card-header">
+                    <span class="card-title">Peak P&L</span>
+                </div>
+                <div class="stat-value positive" id="peak-pnl">$0.00</div>
+                <div class="stat-label">Highest point today</div>
+            </div>
+
+            <div class="card stat-card">
+                <div class="card-header">
+                    <span class="card-title">Lowest P&L</span>
+                </div>
+                <div class="stat-value negative" id="lowest-pnl">$0.00</div>
+                <div class="stat-label">Lowest point today</div>
+            </div>
+        </section>
+
+        <!-- Cumulative P&L Chart -->
+        <section class="card mb-lg">
+            <div class="card-header">
+                <span class="card-title">Cumulative P&L Over Time</span>
+                <span class="badge badge-info" id="trade-count">0 data points</span>
+            </div>
+            <div class="chart-container large" id="cumulative-chart-container">
+                <canvas id="cumulative-chart"></canvas>
+            </div>
+        </section>
+
+        <!-- Hourly P&L Chart -->
+        <section class="card mb-lg">
+            <div class="card-header">
+                <span class="card-title">Hourly P&L Breakdown</span>
+                <span class="text-secondary" style="font-size: 0.75rem;">P&L aggregated by hour</span>
+            </div>
+            <div class="chart-container large" id="hourly-chart-container">
+                <canvas id="hourly-chart"></canvas>
+            </div>
+        </section>
+
+        <!-- Trade Timeline -->
+        <section class="card">
+            <div class="card-header">
+                <span class="card-title">Trade Timeline</span>
+                <span class="text-secondary" style="font-size: 0.75rem;">Individual trades as they occurred</span>
+            </div>
+            <div class="chart-container" id="timeline-chart-container">
+                <canvas id="timeline-chart"></canvas>
+            </div>
+        </section>
+
+        <!-- Footer -->
+        <footer class="footer">
+            <p>NUAH Multi-Agent Trading System • P&L Visualization</p>
+            <p class="mt-sm">Data refreshes automatically every 30 seconds</p>
+        </footer>
+    </div>
+
+    <script src="/static/js/common.js"></script>
+    <script>
+        // Chart instances
+        let cumulativeChart = null;
+        let hourlyChart = null;
+        let timelineChart = null;
+
+        /**
+         * Create cumulative P&L line chart
+         */
+        function createCumulativeChart(data) {
+            const ctx = document.getElementById('cumulative-chart').getContext('2d');
+            
+            if (cumulativeChart) {
+                cumulativeChart.destroy();
+            }
+
+            const cumulative = data.cumulative || [];
+            
+            if (cumulative.length === 0) {
+                document.getElementById('cumulative-chart-container').innerHTML = `
+                    <div class="empty-state">
+                        <div class="empty-state-icon">📉</div>
+                        <div class="empty-state-title">No Trade Data</div>
+                        <div class="empty-state-text">Cumulative P&L will appear here as trades are executed</div>
+                    </div>
+                `;
+                return;
+            }
+
+            // Prepare data
+            const labels = cumulative.map((d, i) => formatTime(d.timestamp) || `Trade ${i + 1}`);
+            const values = cumulative.map(d => d.cumulative_pnl);
+            
+            // Calculate peak and lowest
+            const peak = Math.max(...values);
+            const lowest = Math.min(...values);
+            document.getElementById('peak-pnl').textContent = formatCurrency(peak, true) + ' N$';
+            document.getElementById('lowest-pnl').textContent = formatCurrency(lowest, true) + ' N$';
+
+            // Determine color based on final value
+            const finalValue = values[values.length - 1] || 0;
+            const lineColor = finalValue >= 0 ? chartColors.cyan : chartColors.red;
+            const fillColor = finalValue >= 0 ? chartColors.cyanDim : chartColors.redDim;
+
+            cumulativeChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        label: 'Cumulative P&L (N$)',
+                        data: values,
+                        borderColor: lineColor,
+                        backgroundColor: fillColor,
+                        borderWidth: 2,
+                        fill: true,
+                        tension: 0.4,
+                        pointRadius: 4,
+                        pointHoverRadius: 6,
+                        pointBackgroundColor: lineColor,
+                        pointBorderColor: '#0a0e14',
+                        pointBorderWidth: 2
+                    }]
+                },
+                options: {
+                    ...chartDefaults,
+                    plugins: {
+                        ...chartDefaults.plugins,
+                        legend: {
+                            display: false
+                        },
+                        tooltip: {
+                            ...chartDefaults.plugins.tooltip,
+                            callbacks: {
+                                label: function(context) {
+                                    return `P&L: ${formatCurrency(context.raw, true)} N$`;
+                                }
+                            }
+                        }
+                    },
+                    scales: {
+                        ...chartDefaults.scales,
+                        y: {
+                            ...chartDefaults.scales.y,
+                            ticks: {
+                                ...chartDefaults.scales.y.ticks,
+                                callback: function(value) {
+                                    return formatCurrency(value, true);
+                                }
+                            }
+                        }
+                    },
+                    interaction: {
+                        intersect: false,
+                        mode: 'index'
+                    }
+                }
+            });
+
+            // Update trade count badge
+            document.getElementById('trade-count').textContent = `${cumulative.length} trades`;
+        }
+
+        /**
+         * Create hourly P&L bar chart
+         */
+        function createHourlyChart(data) {
+            const ctx = document.getElementById('hourly-chart').getContext('2d');
+            
+            if (hourlyChart) {
+                hourlyChart.destroy();
+            }
+
+            const timeline = data.timeline || [];
+            
+            if (timeline.length === 0 || timeline.every(d => d.pnl === 0)) {
+                document.getElementById('hourly-chart-container').innerHTML = `
+                    <div class="empty-state">
+                        <div class="empty-state-icon">📊</div>
+                        <div class="empty-state-title">No Hourly Data</div>
+                        <div class="empty-state-text">Hourly breakdown will appear as trades are executed throughout the day</div>
+                    </div>
+                `;
+                return;
+            }
+
+            const labels = timeline.map(d => d.label);
+            const values = timeline.map(d => d.pnl);
+            const colors = values.map(v => v >= 0 ? chartColors.cyan : chartColors.red);
+            const bgColors = values.map(v => v >= 0 ? chartColors.cyanDim : chartColors.redDim);
+
+            hourlyChart = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        label: 'Hourly P&L (N$)',
+                        data: values,
+                        backgroundColor: bgColors,
+                        borderColor: colors,
+                        borderWidth: 1,
+                        borderRadius: 4,
+                        borderSkipped: false
+                    }]
+                },
+                options: {
+                    ...chartDefaults,
+                    plugins: {
+                        ...chartDefaults.plugins,
+                        legend: {
+                            display: false
+                        },
+                        tooltip: {
+                            ...chartDefaults.plugins.tooltip,
+                            callbacks: {
+                                label: function(context) {
+                                    return `P&L: ${formatCurrency(context.raw, true)} N$`;
+                                }
+                            }
+                        }
+                    },
+                    scales: {
+                        ...chartDefaults.scales,
+                        y: {
+                            ...chartDefaults.scales.y,
+                            ticks: {
+                                ...chartDefaults.scales.y.ticks,
+                                callback: function(value) {
+                                    return formatCurrency(value, true);
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        /**
+         * Create trade timeline scatter chart
+         */
+        function createTimelineChart(data) {
+            const ctx = document.getElementById('timeline-chart').getContext('2d');
+            
+            if (timelineChart) {
+                timelineChart.destroy();
+            }
+
+            const cumulative = data.cumulative || [];
+            
+            if (cumulative.length === 0) {
+                document.getElementById('timeline-chart-container').innerHTML = `
+                    <div class="empty-state">
+                        <div class="empty-state-icon">⏱️</div>
+                        <div class="empty-state-title">No Timeline Data</div>
+                        <div class="empty-state-text">Individual trade points will appear here</div>
+                    </div>
+                `;
+                return;
+            }
+
+            // Prepare scatter data
+            const positiveData = [];
+            const negativeData = [];
+            
+            cumulative.forEach((d, i) => {
+                const point = { x: i, y: d.pnl, timestamp: d.timestamp };
+                if (d.pnl >= 0) {
+                    positiveData.push(point);
+                } else {
+                    negativeData.push(point);
+                }
+            });
+
+            timelineChart = new Chart(ctx, {
+                type: 'scatter',
+                data: {
+                    datasets: [
+                        {
+                            label: 'Profitable Trades',
+                            data: positiveData,
+                            backgroundColor: chartColors.cyan,
+                            borderColor: chartColors.cyan,
+                            pointRadius: 8,
+                            pointHoverRadius: 12
+                        },
+                        {
+                            label: 'Losing Trades',
+                            data: negativeData,
+                            backgroundColor: chartColors.red,
+                            borderColor: chartColors.red,
+                            pointRadius: 8,
+                            pointHoverRadius: 12
+                        }
+                    ]
+                },
+                options: {
+                    ...chartDefaults,
+                    plugins: {
+                        ...chartDefaults.plugins,
+                        tooltip: {
+                            ...chartDefaults.plugins.tooltip,
+                            callbacks: {
+                                label: function(context) {
+                                    const point = context.raw;
+                                    return [
+                                        `Time: ${formatTime(point.timestamp)}`,
+                                        `P&L: ${formatCurrency(point.y, true)} N$`
+                                    ];
+                                }
+                            }
+                        }
+                    },
+                    scales: {
+                        x: {
+                            ...chartDefaults.scales.x,
+                            title: {
+                                display: true,
+                                text: 'Trade Sequence',
+                                color: '#8b949e'
+                            },
+                            ticks: {
+                                ...chartDefaults.scales.x.ticks,
+                                callback: function(value) {
+                                    return `#${value + 1}`;
+                                }
+                            }
+                        },
+                        y: {
+                            ...chartDefaults.scales.y,
+                            title: {
+                                display: true,
+                                text: 'P&L (N$)',
+                                color: '#8b949e'
+                            },
+                            ticks: {
+                                ...chartDefaults.scales.y.ticks,
+                                callback: function(value) {
+                                    return formatCurrency(value, true);
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        /**
+         * Load and display P&L timeline data
+         */
+        async function loadPnLTimeline() {
+            try {
+                const [timelineData, summaryData] = await Promise.all([
+                    fetchAPI('/api/pnl-timeline'),
+                    fetchAPI('/api/daily-summary')
+                ]);
+
+                // Update total P&L
+                const pnl = formatPnL(summaryData.total_pnl);
+                const pnlEl = document.getElementById('total-pnl');
+                pnlEl.textContent = pnl.text;
+                pnlEl.className = `stat-value ${pnl.className}`;
+
+                // Create charts
+                createCumulativeChart(timelineData);
+                createHourlyChart(timelineData);
+                createTimelineChart(timelineData);
+
+            } catch (error) {
+                console.error('Failed to load P&L timeline:', error);
+                
+                // Show errors in chart containers
+                ['cumulative-chart-container', 'hourly-chart-container', 'timeline-chart-container'].forEach(id => {
+                    const container = document.getElementById(id);
+                    if (container) {
+                        showError(container, 'Failed to load chart data. Make sure the server is running.');
+                    }
+                });
+            }
+        }
+
+        // Initial load
+        loadPnLTimeline();
+
+        // Auto-refresh every 30 seconds
+        setInterval(loadPnLTimeline, 30000);
+    </script>
+</body>
+</html>
+

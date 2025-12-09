@@ -1,0 +1,639 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Analytics Charts - NUAH Trading Dashboard</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>📈</text></svg>">
+    <!-- Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header class="header">
+            <div class="logo">
+                <div class="logo-icon">N</div>
+                <div class="logo-text">
+                    <h1>NUAH</h1>
+                    <span>Analytics Charts</span>
+                </div>
+            </div>
+            <nav class="nav">
+                <a href="/" class="nav-link">Dashboard</a>
+                <a href="/graph.html" class="nav-link">Graph</a>
+                <a href="/chart.html" class="nav-link active">Charts</a>
+            </nav>
+        </header>
+
+        <!-- Summary Stats -->
+        <section class="grid grid-4 mb-lg">
+            <div class="card stat-card">
+                <div class="card-header">
+                    <span class="card-title">Total P&L</span>
+                </div>
+                <div class="stat-value" id="total-pnl">$0.00</div>
+                <div class="stat-label" id="current-time">-</div>
+            </div>
+
+            <div class="card stat-card">
+                <div class="card-header">
+                    <span class="card-title">Tokens Traded</span>
+                </div>
+                <div class="stat-value neutral" id="token-count">0</div>
+                <div class="stat-label">Unique tokens</div>
+            </div>
+
+            <div class="card stat-card">
+                <div class="card-header">
+                    <span class="card-title">Users Active</span>
+                </div>
+                <div class="stat-value neutral" id="user-count">0</div>
+                <div class="stat-label">Trading today</div>
+            </div>
+
+            <div class="card stat-card">
+                <div class="card-header">
+                    <span class="card-title">Avg Confidence</span>
+                </div>
+                <div class="stat-value neutral" id="avg-confidence">0%</div>
+                <div class="stat-label">Decision confidence</div>
+            </div>
+        </section>
+
+        <!-- Charts Row 1 -->
+        <section class="grid grid-2 mb-lg">
+            <!-- Action Distribution -->
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">Action Distribution</span>
+                    <span class="text-secondary" style="font-size: 0.75rem;">Buy vs Sell vs Hold</span>
+                </div>
+                <div class="chart-container" id="action-chart-container">
+                    <canvas id="action-chart"></canvas>
+                </div>
+            </div>
+
+            <!-- Status Distribution -->
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">Execution Status</span>
+                    <span class="text-secondary" style="font-size: 0.75rem;">Completed vs Failed vs Skipped</span>
+                </div>
+                <div class="chart-container" id="status-chart-container">
+                    <canvas id="status-chart"></canvas>
+                </div>
+            </div>
+        </section>
+
+        <!-- Charts Row 2 -->
+        <section class="grid grid-2 mb-lg">
+            <!-- Token P&L Breakdown -->
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">P&L by Token</span>
+                    <span class="text-secondary" style="font-size: 0.75rem;">Performance per token</span>
+                </div>
+                <div class="chart-container large" id="token-chart-container">
+                    <canvas id="token-chart"></canvas>
+                </div>
+            </div>
+
+            <!-- User Performance -->
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">P&L by User</span>
+                    <span class="text-secondary" style="font-size: 0.75rem;">Top performing users</span>
+                </div>
+                <div class="chart-container large" id="user-chart-container">
+                    <canvas id="user-chart"></canvas>
+                </div>
+            </div>
+        </section>
+
+        <!-- Token Details Table -->
+        <section class="card mb-lg">
+            <div class="card-header">
+                <span class="card-title">Token Performance Details</span>
+                <span class="badge badge-info" id="token-badge">0 tokens</span>
+            </div>
+            <div class="table-container" id="token-table">
+                <div class="loading">
+                    <div class="loading-spinner"></div>
+                    <span>Loading token data...</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- User Details Table -->
+        <section class="card">
+            <div class="card-header">
+                <span class="card-title">User Performance Details</span>
+                <span class="badge badge-info" id="user-badge">0 users</span>
+            </div>
+            <div class="table-container" id="user-table">
+                <div class="loading">
+                    <div class="loading-spinner"></div>
+                    <span>Loading user data...</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- Footer -->
+        <footer class="footer">
+            <p>NUAH Multi-Agent Trading System • Analytics & Breakdown</p>
+            <p class="mt-sm">Data refreshes automatically every 30 seconds</p>
+        </footer>
+    </div>
+
+    <script src="/static/js/common.js"></script>
+    <script>
+        // Chart instances
+        let actionChart = null;
+        let statusChart = null;
+        let tokenChart = null;
+        let userChart = null;
+
+        /**
+         * Create action distribution doughnut chart
+         */
+        function createActionChart(data) {
+            const ctx = document.getElementById('action-chart').getContext('2d');
+            
+            if (actionChart) {
+                actionChart.destroy();
+            }
+
+            const actions = data.actions || [];
+            
+            if (actions.length === 0) {
+                document.getElementById('action-chart-container').innerHTML = `
+                    <div class="empty-state">
+                        <div class="empty-state-icon">🎯</div>
+                        <div class="empty-state-title">No Action Data</div>
+                        <div class="empty-state-text">Action distribution will appear here</div>
+                    </div>
+                `;
+                return;
+            }
+
+            const labels = actions.map(a => a.action.toUpperCase());
+            const values = actions.map(a => a.count);
+            const colors = actions.map(a => {
+                switch(a.action.toLowerCase()) {
+                    case 'buy': return chartColors.cyan;
+                    case 'sell': return chartColors.red;
+                    case 'hold': return chartColors.yellow;
+                    default: return chartColors.gray;
+                }
+            });
+
+            actionChart = new Chart(ctx, {
+                type: 'doughnut',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        data: values,
+                        backgroundColor: colors,
+                        borderColor: '#0a0e14',
+                        borderWidth: 3,
+                        hoverOffset: 10
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    cutout: '65%',
+                    plugins: {
+                        legend: {
+                            position: 'bottom',
+                            labels: {
+                                color: '#8b949e',
+                                font: {
+                                    family: "'Sora', sans-serif",
+                                    size: 12
+                                },
+                                padding: 20,
+                                usePointStyle: true,
+                                pointStyle: 'circle'
+                            }
+                        },
+                        tooltip: {
+                            ...chartDefaults.plugins.tooltip,
+                            callbacks: {
+                                label: function(context) {
+                                    const total = context.dataset.data.reduce((a, b) => a + b, 0);
+                                    const percent = ((context.raw / total) * 100).toFixed(1);
+                                    return `${context.label}: ${context.raw} (${percent}%)`;
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        /**
+         * Create status distribution doughnut chart
+         */
+        function createStatusChart(data) {
+            const ctx = document.getElementById('status-chart').getContext('2d');
+            
+            if (statusChart) {
+                statusChart.destroy();
+            }
+
+            const statuses = data.statuses || [];
+            
+            if (statuses.length === 0) {
+                document.getElementById('status-chart-container').innerHTML = `
+                    <div class="empty-state">
+                        <div class="empty-state-icon">📋</div>
+                        <div class="empty-state-title">No Status Data</div>
+                        <div class="empty-state-text">Execution status will appear here</div>
+                    </div>
+                `;
+                return;
+            }
+
+            const labels = statuses.map(s => s.status.charAt(0).toUpperCase() + s.status.slice(1));
+            const values = statuses.map(s => s.count);
+            const colors = statuses.map(s => {
+                switch(s.status.toLowerCase()) {
+                    case 'completed': return chartColors.cyan;
+                    case 'failed': return chartColors.red;
+                    case 'skipped': return chartColors.yellow;
+                    case 'simulated': return chartColors.blue;
+                    default: return chartColors.gray;
+                }
+            });
+
+            statusChart = new Chart(ctx, {
+                type: 'doughnut',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        data: values,
+                        backgroundColor: colors,
+                        borderColor: '#0a0e14',
+                        borderWidth: 3,
+                        hoverOffset: 10
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    cutout: '65%',
+                    plugins: {
+                        legend: {
+                            position: 'bottom',
+                            labels: {
+                                color: '#8b949e',
+                                font: {
+                                    family: "'Sora', sans-serif",
+                                    size: 12
+                                },
+                                padding: 20,
+                                usePointStyle: true,
+                                pointStyle: 'circle'
+                            }
+                        },
+                        tooltip: {
+                            ...chartDefaults.plugins.tooltip,
+                            callbacks: {
+                                label: function(context) {
+                                    const total = context.dataset.data.reduce((a, b) => a + b, 0);
+                                    const percent = ((context.raw / total) * 100).toFixed(1);
+                                    return `${context.label}: ${context.raw} (${percent}%)`;
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        /**
+         * Create token P&L horizontal bar chart
+         */
+        function createTokenChart(data) {
+            const ctx = document.getElementById('token-chart').getContext('2d');
+            
+            if (tokenChart) {
+                tokenChart.destroy();
+            }
+
+            const tokens = data.tokens || [];
+            
+            if (tokens.length === 0) {
+                document.getElementById('token-chart-container').innerHTML = `
+                    <div class="empty-state">
+                        <div class="empty-state-icon">🪙</div>
+                        <div class="empty-state-title">No Token Data</div>
+                        <div class="empty-state-text">Token performance will appear here</div>
+                    </div>
+                `;
+                return;
+            }
+
+            // Update token count
+            document.getElementById('token-count').textContent = tokens.length;
+            document.getElementById('token-badge').textContent = `${tokens.length} tokens`;
+
+            // Sort by P&L and take top 10
+            const sortedTokens = [...tokens].sort((a, b) => b.total_pnl - a.total_pnl).slice(0, 10);
+            
+            const labels = sortedTokens.map(t => t.symbol);
+            const values = sortedTokens.map(t => t.total_pnl);
+            const colors = values.map(v => v >= 0 ? chartColors.cyan : chartColors.red);
+            const bgColors = values.map(v => v >= 0 ? chartColors.cyanDim : chartColors.redDim);
+
+            tokenChart = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        label: 'P&L (N$)',
+                        data: values,
+                        backgroundColor: bgColors,
+                        borderColor: colors,
+                        borderWidth: 1,
+                        borderRadius: 4
+                    }]
+                },
+                options: {
+                    ...chartDefaults,
+                    indexAxis: 'y',
+                    plugins: {
+                        ...chartDefaults.plugins,
+                        legend: {
+                            display: false
+                        },
+                        tooltip: {
+                            ...chartDefaults.plugins.tooltip,
+                            callbacks: {
+                                label: function(context) {
+                                    return `P&L: ${formatCurrency(context.raw, true)} N$`;
+                                }
+                            }
+                        }
+                    },
+                    scales: {
+                        x: {
+                            ...chartDefaults.scales.x,
+                            ticks: {
+                                ...chartDefaults.scales.x.ticks,
+                                callback: function(value) {
+                                    return formatCurrency(value, true);
+                                }
+                            }
+                        },
+                        y: {
+                            ...chartDefaults.scales.y,
+                            ticks: {
+                                ...chartDefaults.scales.y.ticks,
+                                font: {
+                                    family: "'JetBrains Mono', monospace",
+                                    size: 11
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+
+            // Update token table
+            updateTokenTable(tokens);
+        }
+
+        /**
+         * Create user P&L horizontal bar chart
+         */
+        function createUserChart(data) {
+            const ctx = document.getElementById('user-chart').getContext('2d');
+            
+            if (userChart) {
+                userChart.destroy();
+            }
+
+            const users = data.users || [];
+            
+            if (users.length === 0) {
+                document.getElementById('user-chart-container').innerHTML = `
+                    <div class="empty-state">
+                        <div class="empty-state-icon">👥</div>
+                        <div class="empty-state-title">No User Data</div>
+                        <div class="empty-state-text">User performance will appear here</div>
+                    </div>
+                `;
+                return;
+            }
+
+            // Update user count
+            document.getElementById('user-count').textContent = users.length;
+            document.getElementById('user-badge').textContent = `${users.length} users`;
+
+            // Sort by P&L and take top 10
+            const sortedUsers = [...users].sort((a, b) => b.total_pnl - a.total_pnl).slice(0, 10);
+            
+            const labels = sortedUsers.map(u => `User #${u.user_id}`);
+            const values = sortedUsers.map(u => u.total_pnl);
+            const colors = values.map(v => v >= 0 ? chartColors.cyan : chartColors.red);
+            const bgColors = values.map(v => v >= 0 ? chartColors.cyanDim : chartColors.redDim);
+
+            userChart = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        label: 'P&L (N$)',
+                        data: values,
+                        backgroundColor: bgColors,
+                        borderColor: colors,
+                        borderWidth: 1,
+                        borderRadius: 4
+                    }]
+                },
+                options: {
+                    ...chartDefaults,
+                    indexAxis: 'y',
+                    plugins: {
+                        ...chartDefaults.plugins,
+                        legend: {
+                            display: false
+                        },
+                        tooltip: {
+                            ...chartDefaults.plugins.tooltip,
+                            callbacks: {
+                                label: function(context) {
+                                    return `P&L: ${formatCurrency(context.raw, true)} N$`;
+                                }
+                            }
+                        }
+                    },
+                    scales: {
+                        x: {
+                            ...chartDefaults.scales.x,
+                            ticks: {
+                                ...chartDefaults.scales.x.ticks,
+                                callback: function(value) {
+                                    return formatCurrency(value, true);
+                                }
+                            }
+                        },
+                        y: {
+                            ...chartDefaults.scales.y
+                        }
+                    }
+                }
+            });
+
+            // Update user table
+            updateUserTable(users);
+        }
+
+        /**
+         * Update token details table
+         */
+        function updateTokenTable(tokens) {
+            const container = document.getElementById('token-table');
+            
+            if (!tokens || tokens.length === 0) {
+                showEmpty(container, 'No token data available');
+                return;
+            }
+
+            let html = `
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Token</th>
+                            <th class="text-right">Total P&L</th>
+                            <th class="text-right">Trades</th>
+                            <th class="text-right">Buys</th>
+                            <th class="text-right">Sells</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+            `;
+
+            for (const token of tokens) {
+                const pnl = formatPnL(token.total_pnl);
+                html += `
+                    <tr>
+                        <td class="cell-mono">${token.symbol}</td>
+                        <td class="cell-pnl ${pnl.className} text-right">${pnl.text}</td>
+                        <td class="text-right">${token.trade_count}</td>
+                        <td class="text-right text-positive">${token.buy_count}</td>
+                        <td class="text-right text-negative">${token.sell_count}</td>
+                    </tr>
+                `;
+            }
+
+            html += '</tbody></table>';
+            container.innerHTML = html;
+        }
+
+        /**
+         * Update user details table
+         */
+        function updateUserTable(users) {
+            const container = document.getElementById('user-table');
+            
+            if (!users || users.length === 0) {
+                showEmpty(container, 'No user data available');
+                return;
+            }
+
+            let html = `
+                <table>
+                    <thead>
+                        <tr>
+                            <th>User ID</th>
+                            <th class="text-right">Total P&L</th>
+                            <th class="text-right">Trades</th>
+                            <th class="text-right">Buys</th>
+                            <th class="text-right">Sells</th>
+                            <th class="text-right">Completed</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+            `;
+
+            for (const user of users) {
+                const pnl = formatPnL(user.total_pnl);
+                html += `
+                    <tr>
+                        <td class="cell-mono">#${user.user_id}</td>
+                        <td class="cell-pnl ${pnl.className} text-right">${pnl.text}</td>
+                        <td class="text-right">${user.trade_count}</td>
+                        <td class="text-right text-positive">${user.buy_count}</td>
+                        <td class="text-right text-negative">${user.sell_count}</td>
+                        <td class="text-right">${user.completed_count}</td>
+                    </tr>
+                `;
+            }
+
+            html += '</tbody></table>';
+            container.innerHTML = html;
+        }
+
+        /**
+         * Load all chart data
+         */
+        async function loadChartData() {
+            try {
+                const [summary, actions, statuses, tokens, users] = await Promise.all([
+                    fetchAPI('/api/daily-summary'),
+                    fetchAPI('/api/action-breakdown'),
+                    fetchAPI('/api/status-breakdown'),
+                    fetchAPI('/api/token-breakdown'),
+                    fetchAPI('/api/user-breakdown')
+                ]);
+
+                // Update total P&L
+                const pnl = formatPnL(summary.total_pnl);
+                const pnlEl = document.getElementById('total-pnl');
+                pnlEl.textContent = pnl.text;
+                pnlEl.className = `stat-value ${pnl.className}`;
+
+                // Calculate average confidence
+                let totalConf = 0;
+                let confCount = 0;
+                for (const action of actions.actions) {
+                    if (action.avg_confidence) {
+                        totalConf += action.avg_confidence * action.count;
+                        confCount += action.count;
+                    }
+                }
+                const avgConf = confCount > 0 ? (totalConf / confCount) * 100 : 0;
+                document.getElementById('avg-confidence').textContent = `${avgConf.toFixed(1)}%`;
+
+                // Create charts
+                createActionChart(actions);
+                createStatusChart(statuses);
+                createTokenChart(tokens);
+                createUserChart(users);
+
+            } catch (error) {
+                console.error('Failed to load chart data:', error);
+                
+                ['action-chart-container', 'status-chart-container', 'token-chart-container', 'user-chart-container'].forEach(id => {
+                    const container = document.getElementById(id);
+                    if (container) {
+                        showError(container, 'Failed to load chart data');
+                    }
+                });
+            }
+        }
+
+        // Initial load
+        loadChartData();
+
+        // Auto-refresh every 30 seconds
+        setInterval(loadChartData, 30000);
+    </script>
+</body>
+</html>
+

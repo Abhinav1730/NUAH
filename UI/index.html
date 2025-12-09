@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NUAH Trading Dashboard</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>📈</text></svg>">
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header class="header">
+            <div class="logo">
+                <div class="logo-icon">N</div>
+                <div class="logo-text">
+                    <h1>NUAH</h1>
+                    <span>Trading Dashboard</span>
+                </div>
+            </div>
+            <nav class="nav">
+                <a href="/" class="nav-link active">Dashboard</a>
+                <a href="/graph.html" class="nav-link">Graph</a>
+                <a href="/chart.html" class="nav-link">Charts</a>
+            </nav>
+        </header>
+
+        <!-- Main P&L Display -->
+        <section id="pnl-hero" class="pnl-hero">
+            <div class="pnl-label">Today's Total P&L</div>
+            <div class="pnl-value zero" id="total-pnl">$0.00</div>
+            <div class="pnl-date" id="current-time">Loading...</div>
+        </section>
+
+        <!-- Stats Grid -->
+        <section class="grid grid-4 mb-lg">
+            <div class="card stat-card">
+                <div class="card-header">
+                    <span class="card-title">Total Trades</span>
+                    <div class="card-icon neutral">📊</div>
+                </div>
+                <div class="stat-value neutral" id="total-trades">0</div>
+                <div class="stat-label">Executed today</div>
+            </div>
+
+            <div class="card stat-card">
+                <div class="card-header">
+                    <span class="card-title">Successful</span>
+                    <div class="card-icon positive">✓</div>
+                </div>
+                <div class="stat-value positive" id="successful-trades">0</div>
+                <div class="stat-label" id="success-rate">0% success rate</div>
+            </div>
+
+            <div class="card stat-card">
+                <div class="card-header">
+                    <span class="card-title">Buy Orders</span>
+                    <div class="card-icon positive">↑</div>
+                </div>
+                <div class="stat-value positive" id="buy-count">0</div>
+                <div class="stat-label">Purchases today</div>
+            </div>
+
+            <div class="card stat-card">
+                <div class="card-header">
+                    <span class="card-title">Sell Orders</span>
+                    <div class="card-icon negative">↓</div>
+                </div>
+                <div class="stat-value negative" id="sell-count">0</div>
+                <div class="stat-label">Sales today</div>
+            </div>
+        </section>
+
+        <!-- Best/Worst Trades -->
+        <section class="grid grid-2 mb-lg">
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">Best Trade</span>
+                    <div class="card-icon positive">🏆</div>
+                </div>
+                <div id="best-trade">
+                    <div class="empty-state-text text-muted">No profitable trades yet</div>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">Worst Trade</span>
+                    <div class="card-icon negative">📉</div>
+                </div>
+                <div id="worst-trade">
+                    <div class="empty-state-text text-muted">No losing trades yet</div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Recent Trades Table -->
+        <section class="card">
+            <div class="card-header">
+                <span class="card-title">Recent Trades</span>
+                <span class="badge badge-info" id="trade-count-badge">0 trades</span>
+            </div>
+            <div class="table-container" id="trades-table">
+                <div class="loading">
+                    <div class="loading-spinner"></div>
+                    <span>Loading trades...</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- Footer -->
+        <footer class="footer">
+            <p>NUAH Multi-Agent Trading System • Real-time P&L Dashboard</p>
+            <p class="mt-sm">Data refreshes automatically every 30 seconds</p>
+        </footer>
+    </div>
+
+    <script src="/static/js/common.js"></script>
+    <script>
+        // Dashboard-specific JavaScript
+
+        /**
+         * Load and display daily summary
+         */
+        async function loadDailySummary() {
+            try {
+                const data = await fetchAPI('/api/daily-summary');
+                
+                // Update P&L hero
+                const pnlHero = document.getElementById('pnl-hero');
+                const pnlValue = document.getElementById('total-pnl');
+                const pnl = formatPnL(data.total_pnl);
+                
+                pnlValue.textContent = pnl.text;
+                pnlValue.className = `pnl-value ${pnl.className}`;
+                pnlHero.className = `pnl-hero ${data.total_pnl < 0 ? 'negative' : ''}`;
+                
+                // Update stats
+                document.getElementById('total-trades').textContent = data.total_trades;
+                document.getElementById('successful-trades').textContent = data.successful_trades;
+                document.getElementById('success-rate').textContent = `${data.success_rate}% success rate`;
+                document.getElementById('buy-count').textContent = data.buy_count;
+                document.getElementById('sell-count').textContent = data.sell_count;
+                
+                // Update best trade
+                const bestTradeEl = document.getElementById('best-trade');
+                if (data.best_trade) {
+                    const bestPnl = formatPnL(data.best_trade.pnl);
+                    bestTradeEl.innerHTML = `
+                        <div class="stat-value positive" style="font-size: 1.5rem;">
+                            ${bestPnl.text}
+                        </div>
+                        <div class="stat-label mt-sm">
+                            ${getActionBadge(data.best_trade.action)} 
+                            <span class="cell-mono">${truncateToken(data.best_trade.token)}</span>
+                        </div>
+                    `;
+                } else {
+                    bestTradeEl.innerHTML = '<div class="text-muted">No profitable trades yet</div>';
+                }
+                
+                // Update worst trade
+                const worstTradeEl = document.getElementById('worst-trade');
+                if (data.worst_trade) {
+                    const worstPnl = formatPnL(data.worst_trade.pnl);
+                    worstTradeEl.innerHTML = `
+                        <div class="stat-value negative" style="font-size: 1.5rem;">
+                            ${worstPnl.text}
+                        </div>
+                        <div class="stat-label mt-sm">
+                            ${getActionBadge(data.worst_trade.action)} 
+                            <span class="cell-mono">${truncateToken(data.worst_trade.token)}</span>
+                        </div>
+                    `;
+                } else {
+                    worstTradeEl.innerHTML = '<div class="text-muted">No losing trades yet</div>';
+                }
+                
+            } catch (error) {
+                console.error('Failed to load daily summary:', error);
+            }
+        }
+
+        /**
+         * Load and display recent trades
+         */
+        async function loadRecentTrades() {
+            const container = document.getElementById('trades-table');
+            
+            try {
+                const data = await fetchAPI('/api/trades-today');
+                
+                // Update badge
+                document.getElementById('trade-count-badge').textContent = `${data.count} trades`;
+                
+                if (!data.trades || data.trades.length === 0) {
+                    showEmpty(container, 'No trades have been executed today. The trade-agent will make decisions based on market signals.');
+                    return;
+                }
+                
+                // Build table
+                let html = `
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Time</th>
+                                <th>User</th>
+                                <th>Token</th>
+                                <th>Action</th>
+                                <th>Amount</th>
+                                <th>P&L</th>
+                                <th>Confidence</th>
+                                <th>Status</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                `;
+                
+                for (const trade of data.trades) {
+                    const pnl = formatPnL(trade.pnl);
+                    const confidence = (trade.confidence * 100).toFixed(0);
+                    
+                    html += `
+                        <tr>
+                            <td class="cell-mono">${formatTime(trade.timestamp)}</td>
+                            <td class="cell-mono">${trade.user_id}</td>
+                            <td class="cell-mono">${truncateToken(trade.token_mint)}</td>
+                            <td>${getActionBadge(trade.action)}</td>
+                            <td class="cell-mono">${trade.amount ? formatCurrency(trade.amount) + ' N$' : '-'}</td>
+                            <td class="cell-pnl ${pnl.className}">${pnl.text}</td>
+                            <td>
+                                <div class="flex gap-sm" style="align-items: center;">
+                                    <div style="width: 60px; height: 4px; background: var(--bg-input); border-radius: 2px; overflow: hidden;">
+                                        <div style="width: ${confidence}%; height: 100%; background: ${confidence >= 70 ? 'var(--accent-cyan)' : confidence >= 50 ? 'var(--accent-yellow)' : 'var(--accent-red)'}"></div>
+                                    </div>
+                                    <span class="cell-mono" style="font-size: 0.75rem;">${confidence}%</span>
+                                </div>
+                            </td>
+                            <td>${getStatusIndicator(trade.status)}</td>
+                        </tr>
+                    `;
+                }
+                
+                html += '</tbody></table>';
+                container.innerHTML = html;
+                
+            } catch (error) {
+                console.error('Failed to load trades:', error);
+                showError(container, 'Failed to load trade data. Make sure the server is running.');
+            }
+        }
+
+        /**
+         * Initialize dashboard
+         */
+        async function initDashboard() {
+            await Promise.all([
+                loadDailySummary(),
+                loadRecentTrades()
+            ]);
+        }
+
+        // Initial load
+        initDashboard();
+
+        // Auto-refresh every 30 seconds
+        setInterval(initDashboard, 30000);
+    </script>
+</body>
+</html>
+
