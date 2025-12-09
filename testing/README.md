@@ -17,6 +17,8 @@ testing/
 ├── config.py                 # Central configuration
 ├── requirements.txt          # Python dependencies
 ├── run_simulation.py         # Main orchestrator script
+├── fast_mode_test.py         # Fast pipeline testing (NEW)
+├── live_simulation.py        # Continuous live simulation (NEW)
 ├── README.md                 # This file
 │
 ├── database/                 # Database utilities
@@ -26,7 +28,8 @@ testing/
 ├── generators/               # Test data generators
 │   ├── coin_generator.py     # Creates 100 dummy meme coins
 │   ├── user_generator.py     # Creates 1000 test users
-│   └── price_simulator.py    # Simulates price movements
+│   ├── price_simulator.py    # Simulates price movements
+│   └── signal_generator.py   # Generates agent signals (NEW)
 │
 ├── agent_test/               # Agent testing utilities
 │   ├── test_harness.py       # Test harness for agent
@@ -37,7 +40,10 @@ testing/
 │   ├── generated_coins.json
 │   ├── generated_users.json
 │   ├── price_histories.json
-│   └── time_series.csv
+│   ├── time_series.csv
+│   ├── news_signals.csv      # From signal_generator
+│   ├── trend_signals.csv     # From signal_generator
+│   └── rule_evaluations.csv  # From signal_generator
 │
 ├── reports/                  # Test reports (auto-created)
 │   └── simulation_results_*.json
@@ -133,20 +139,53 @@ The price simulator generates realistic pump.fun-style price movements with **fa
 
 ## 🧪 Testing Modes
 
-### 1. Agent Test Harness
-Tests the actual trade-agent or simulates decisions:
+### 1. Full Simulation (Batch Mode)
+Tests the complete pipeline with batch data:
 ```bash
 python run_simulation.py --test-only
 python run_simulation.py --test-only --real-agent  # Use actual agent
 ```
 
-### 2. Backtester
+### 2. Fast Pipeline Test (NEW)
+Tests the real-time fast trading pipeline specifically:
+```bash
+# Simulated test (quick)
+python fast_mode_test.py
+
+# 5-minute test
+python fast_mode_test.py --duration 300
+
+# Live pipeline test (requires trade-agent running)
+python fast_mode_test.py --live --duration 60
+```
+
+### 3. Live Simulation (NEW)
+Runs a continuous simulation with real-time price updates:
+```bash
+# 1-hour simulation with 60s price updates
+python live_simulation.py --hours 1
+
+# Real-time mode (5s price updates like pump.fun)
+python live_simulation.py --hours 1 --realtime
+
+# 24-hour simulation
+python live_simulation.py --hours 24 --price-interval 60
+```
+
+### 4. Backtester
 Replays historical prices to evaluate strategy:
 ```bash
 python run_simulation.py --backtest
 ```
 
-### 3. Performance Metrics
+### 5. Signal Generator (NEW)
+Generate agent signals without running actual agents:
+```bash
+# Generate all signals (news, trend, rules)
+python generators/signal_generator.py
+```
+
+### 6. Performance Metrics
 Calculated metrics include:
 - **Win Rate**: Percentage of profitable trades
 - **Total P&L**: Net profit/loss
