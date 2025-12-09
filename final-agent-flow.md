@@ -2,678 +2,330 @@
 
 ## Overview Architecture
 
+The NUAH trading system now supports **two trading modes**:
+
+1. **Standard Mode**: Traditional interval-based trading (30-60 min cycles)
+2. **Fast Mode**: Real-time pump.fun-style trading (5-15 second cycles)
+
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                           nuahchain-backend (Go)                            │
 │  • REST API server on localhost:8080                                        │
 │  • PostgreSQL database (users, wallets, tokens)                             │
 │  • Blockchain connection for trading                                        │
+│  • Bonding curve mechanics                                                  │
 └─────────────────────────────────────────────────────────────────────────────┘
                                     ▲
                                     │ HTTP API calls
                                     │ (JWT authenticated)
                                     ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                        fetch-data-agent (TypeScript)                        │
-│  • Fetches user data from nuahchain-backend                                 │
-│  • Stores SNAPSHOTS in SQLite database                                      │
-│  • Runs on schedule (every 30 minutes)                                      │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                    │
-                                    │ Writes to SQLite
-                                    ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                        SQLite Database (user_data.db)                       │
-│  • users table (profile snapshots)                                          │
-│  • user_balances table (token balances)                                     │
-│  • user_transactions table (trade history)                                  │
-│  • user_portfolios table (portfolio snapshots)                              │
-│  • news_signals, trend_signals, rule_evaluations (from other agents)        │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                    ▲
-                                    │ Reads from SQLite
-                                    │
-┌───────────────┬───────────────┬───────────────┬───────────────┐
-│  news-agent   │  trend-agent  │  rules-agent  │  trade-agent  │
-│  (Python)     │  (Python)     │  (Python)     │  (Python)     │
-│               │               │               │               │
-│ Analyzes news │ Analyzes      │ Evaluates     │ Makes trade   │
-│ sentiment     │ price trends  │ trading rules │ decisions     │
-└───────────────┴───────────────┴───────────────┴───────────────┘
-```
-
----
-
-## Data Flow Summary
-
-| Step | Component | Action | Data Store |
-|------|-----------|--------|------------|
-| 1 | nuahchain-backend | User registers, creates tokens | PostgreSQL |
-| 2 | fetch-data-agent | Fetches user data via API | SQLite |
-| 3 | news-agent | Analyzes news, writes signals | SQLite |
-| 4 | trend-agent | Analyzes trends, writes signals | SQLite |
-| 5 | rules-agent | Evaluates rules, writes evaluations | SQLite |
-| 6 | trade-agent | Reads all data, makes trade decision | SQLite → API |
-
----
-
-## Step-by-Step Flow
-
-### Step 1: nuahchain-backend (Data Source)
-
-```
-User registers → Creates wallet → Can create/buy/sell tokens
-                     │
-                     ▼
-            PostgreSQL Database
-            ┌──────────────────┐
-            │ users            │ (id, email, username)
-            │ wallets          │ (address, encrypted keys)
-            │ tokens           │ (denom, name, symbol)
-            │ sessions         │ (JWT tokens)
-            └──────────────────┘
-```
-
-**Test Data Created:**
-- User: `testbyabhinav@gmail.com` (ID: 1)
-- Wallet: `nuah10e2dde1b41cbeeca5a700c828df18759381f61c7`
-- 5 Test Coins: TBTC, TETH, TSOL, TADA, TDOT
-
-### Step 2: fetch-data-agent (Data Collector)
-
-```
-Every 30 minutes:
-    │
-    ▼
-┌─────────────────────────────────────────┐
-│ 1. Call /api/users/me                   │ → Get user profile
-│ 2. Call /api/users/balances             │ → Get token balances
-│ 3. Call /api/users/balances/history     │ → Get transactions
-│ 4. Call /api/tokens/market              │ → Get market data
-└─────────────────────────────────────────┘
-                     │
-                     ▼
-            Creates a SNAPSHOT
-            (Point-in-time capture of user's state)
-                     │
-                     ▼
-            Saves to SQLite Database
-```
-
----
-
-## What is a SNAPSHOT?
-
-A **snapshot** is a point-in-time capture of a user's complete financial state:
-
-```typescript
-interface UserData {
-  userId: number;
-  profile: {
-    id: number;
-    username: string;
-    email: string;
-    cosmos_address: string;  // Wallet address
-  };
-  balances: [
-    { token_mint: "factory/.../TBTC", balance: "1000000" },
-    { token_mint: "factory/.../TETH", balance: "2000000" },
-    // ... all token holdings
-  ];
-  transactions: [
-    { type: "buy", token: "TBTC", amount: "100", timestamp: "..." },
-    // ... recent trades
-  ];
-  portfolio: {
-    tokens: [...],
-    totalValueNDollar: "150.50",
-    count: 5
-  };
-  marketData: [
-    { token_mint: "TBTC", price: "0.01", volume_24h: "..." },
-    // ... current prices
-  ];
-  fetchedAt: "2025-12-09T17:00:00Z";  // When snapshot was taken
-}
-```
-
-### Why Snapshots?
-
-| Reason | Explanation |
-|--------|-------------|
-| Historical Data | Trade decisions need past data, not just current state |
-| Change Detection | Can detect: "Did user's balance increase/decrease?" |
-| Trend Analysis | Enables: "Is this user's portfolio growing?" |
-| Consistency | Provides consistent view for all agents to read |
-| Offline Analysis | Agents can analyze without constant API calls |
-
----
-
-## SQLite Database Schema
-
-Location: `fetch-data-agent/data/user_data.db`
-
-### Core Tables
-
-```sql
--- User profiles (from /api/users/me)
-CREATE TABLE users (
-    user_id INTEGER PRIMARY KEY,
-    username TEXT,
-    email TEXT,
-    public_key TEXT,           -- Wallet address
-    last_fetched_at TEXT,      -- When last snapshot was taken
-    updated_at TEXT
-);
-
--- Token balances (from /api/users/balances)
-CREATE TABLE user_balances (
-    user_id INTEGER,
-    token_mint TEXT,           -- e.g., "factory/.../TBTC"
-    balance TEXT,              -- e.g., "1000000" (in micro-units)
-    updated_at TEXT
-);
-
--- Transaction history (from /api/users/balances/history)
-CREATE TABLE user_transactions (
-    user_id INTEGER,
-    transaction_type TEXT,     -- "buy", "sell", "transfer"
-    token_mint TEXT,
-    amount TEXT,
-    signature TEXT,            -- Transaction hash
-    timestamp TEXT
-);
-
--- Portfolio snapshots (calculated from balances + market prices)
-CREATE TABLE user_portfolios (
-    user_id INTEGER,
-    total_value_ndollar TEXT,  -- Total portfolio value
-    total_value_sol TEXT,
-    token_count INTEGER,
-    snapshot_json TEXT,        -- Full JSON snapshot
-    created_at TEXT
-);
-```
-
-### Signal Tables (Written by Analysis Agents)
-
-```sql
--- From news-agent
-CREATE TABLE news_signals (
-    token_mint TEXT,
-    headline TEXT,
-    sentiment_score REAL,      -- -1.0 (bearish) to 1.0 (bullish)
-    confidence REAL,           -- 0.0 to 1.0
-    timestamp TEXT
-);
-
--- From trend-agent
-CREATE TABLE trend_signals (
-    token_mint TEXT,
-    trend TEXT,                -- "bullish", "bearish", "neutral"
-    confidence REAL,
-    timestamp TEXT
-);
-
--- From rules-agent
-CREATE TABLE rule_evaluations (
-    user_id INTEGER,
-    token_mint TEXT,
-    allowed INTEGER,           -- 1=can trade, 0=blocked
-    max_position_ndollar REAL,
-    max_daily_trades INTEGER,
-    reason TEXT,
-    confidence REAL
-);
-
--- User preferences
-CREATE TABLE user_preferences (
-    user_id INTEGER PRIMARY KEY,
-    max_position_ndollar REAL, -- Max amount per trade
-    max_trades_per_day INTEGER,
-    risk_level TEXT            -- "low", "medium", "high"
-);
-
--- Trade executions (logged by trade-agent)
-CREATE TABLE trade_executions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    trade_id TEXT UNIQUE NOT NULL,    -- e.g., "TRADE-abc123"
-    user_id INTEGER NOT NULL,
-    token_mint TEXT,                  -- NULL for hold actions
-    action TEXT NOT NULL,             -- "buy", "sell", "hold"
-    amount TEXT,
-    price TEXT,
-    timestamp TIMESTAMP NOT NULL,
-    pnl TEXT,                         -- Profit/Loss (if calculated)
-    slippage TEXT,
-    risk_score REAL,
-    confidence REAL,                  -- 0.0 to 1.0
-    reason TEXT,                      -- Why this decision was made
-    status TEXT DEFAULT 'completed',  -- completed, failed, simulated, skipped
-    tx_hash TEXT,                     -- Blockchain transaction hash
-    error_message TEXT,               -- Error if failed
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-```
-
----
-
-## Trade Agent: Batch Processing (All Users)
-
-The trade-agent processes **ALL users** in the database using batch processing:
-
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                        TRADE-AGENT BATCH PROCESSING                         │
+│                              TRADING MODES                                   │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
-│  1. DISCOVER ALL USERS                                                      │
-│     └─ SELECT * FROM users (NO LIMIT)                                       │
-│     └─ Example: Found 500 users                                             │
-│                                                                             │
-│  2. SPLIT INTO BATCHES                                                      │
-│     └─ BATCH_SIZE = 50 (configurable)                                       │
-│     └─ 500 users ÷ 50 = 10 batches                                          │
-│                                                                             │
-│  3. PROCESS EACH BATCH                                                      │
-│     ┌─────────────────────────────────────────────────────────────────┐     │
-│     │ 📦 Batch 1/10: Users 1-50                                       │     │
-│     │    ├─ User 1  → Pipeline → Decision → Log to DB                 │     │
-│     │    ├─ User 2  → Pipeline → Decision → Log to DB                 │     │
-│     │    └─ ... (48 more users)                                       │     │
-│     │                                                                 │     │
-│     │ ⏳ Wait 5 seconds (BATCH_DELAY_SECONDS)                         │     │
-│     │                                                                 │     │
-│     │ 📦 Batch 2/10: Users 51-100                                     │     │
-│     │    └─ ... process users ...                                     │     │
-│     │                                                                 │     │
-│     │ ⏳ Wait 5 seconds                                               │     │
-│     │                                                                 │     │
-│     │ ... (8 more batches)                                            │     │
-│     │                                                                 │     │
-│     │ 📦 Batch 10/10: Users 451-500                                   │     │
-│     │    └─ ... process users ...                                     │     │
-│     └─────────────────────────────────────────────────────────────────┘     │
-│                                                                             │
-│  4. COMPLETION SUMMARY                                                      │
-│     └─ ✅ Pipeline complete: 500 total, 120 processed, 375 skipped, 5 failed│
+│   ┌─────────────────────┐          ┌─────────────────────────────────────┐  │
+│   │   STANDARD MODE     │          │         FAST MODE (pump.fun)        │  │
+│   │   (30-60 min)       │          │         (5-15 seconds)              │  │
+│   ├─────────────────────┤          ├─────────────────────────────────────┤  │
+│   │ fetch-data-agent    │          │ Real-Time Price Monitor             │  │
+│   │      ↓              │          │      ↓                              │  │
+│   │ SQLite snapshots    │          │ Pattern Detector                    │  │
+│   │      ↓              │          │      ↓                              │  │
+│   │ Analysis agents     │          │ Risk Guard (Stop-Loss/TP)           │  │
+│   │      ↓              │          │      ↓                              │  │
+│   │ LangGraph pipeline  │          │ Fast Decision Engine                │  │
+│   │      ↓              │          │      ↓                              │  │
+│   │ Gemini fusion       │          │ Emergency Exit Handler              │  │
+│   │      ↓              │          │      ↓                              │  │
+│   │ Trade execution     │          │ Instant Trade Execution             │  │
+│   └─────────────────────┘          └─────────────────────────────────────┘  │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Batch Processing Configuration
+---
 
-| Environment Variable | Default | Description |
-|---------------------|---------|-------------|
-| `BATCH_SIZE` | 50 | Users processed per batch. Set to `0` for no batching |
-| `BATCH_DELAY_SECONDS` | 5 | Seconds to wait between batches |
+## Fast Mode Architecture (pump.fun Style)
 
-### Scaling Examples
+### Why Fast Mode?
 
-| Users | Batch Size | Batches | Approx Time |
-|-------|------------|---------|-------------|
-| 100 | 50 | 2 | ~15 seconds |
-| 500 | 50 | 10 | ~1-2 minutes |
-| 1000 | 50 | 20 | ~3-5 minutes |
-| 5000 | 100 | 50 | ~10-15 minutes |
+On pump.fun-style platforms:
+- Prices can change **100%+ in minutes**
+- Rug pulls happen in **seconds**
+- Volume spikes signal **immediate opportunities**
+- Traditional 30-minute cycles **miss everything**
+
+### Fast Mode Components
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         FAST MODE PIPELINE                                   │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  1. PRICE MONITOR (every 5 seconds)                                         │
+│     ├─ Polls prices from nuahchain-backend                                  │
+│     ├─ Maintains rolling 5-minute history per token                        │
+│     ├─ Calculates real-time: momentum, volatility, volume spikes           │
+│     └─ Triggers alerts on significant moves (>5% in 1 min)                 │
+│                                                                             │
+│  2. PATTERN DETECTOR                                                        │
+│     ├─ Identifies patterns in real-time:                                   │
+│     │   • MICRO_PUMP:  +5-15% in 1 min    → Potential entry               │
+│     │   • MID_PUMP:    +15-30% in 1 min   → Momentum play                 │
+│     │   • MEGA_PUMP:   +30%+ in 1 min     → High risk, watch for reversal │
+│     │   • FOMO_SPIKE:  +50%+ in 1 min     → DO NOT CHASE!                 │
+│     │   • DUMP:        -15% in 1 min      → Exit signal                   │
+│     │   • RUG_PULL:    -50%+ in 1 min     → EMERGENCY EXIT!               │
+│     │   • DEAD_CAT:    Recovery after dump → Don't buy the dip            │
+│     └─ Outputs: pattern, confidence, action, risk_level                    │
+│                                                                             │
+│  3. RISK GUARD (Automated)                                                  │
+│     ├─ Stop Loss:      Auto-exit at -10% (configurable)                    │
+│     ├─ Trailing Stop:  Lock profits, trail by 8%                           │
+│     ├─ Take Profit:    Auto-exit at +25% (configurable)                    │
+│     ├─ Partial Takes:  25% at +15%, +30%, +50%                             │
+│     └─ Emergency:      Instant exit at -30% or rug detection               │
+│                                                                             │
+│  4. FAST DECISION ENGINE                                                    │
+│     ├─ Pattern-based rules (no LLM for speed)                              │
+│     ├─ Position sizing based on confidence                                 │
+│     ├─ Rate limiting per user                                              │
+│     └─ Decision time: <100ms                                                │
+│                                                                             │
+│  5. EMERGENCY EXIT HANDLER                                                  │
+│     ├─ Bypasses normal pipeline                                            │
+│     ├─ Accepts higher slippage (10%)                                       │
+│     ├─ Single retry, short timeout                                         │
+│     └─ Target execution: <1 second                                          │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Pattern Detection Thresholds
+
+| Pattern | 1-Min Change | 5-Min Change | Volume | Action | Risk |
+|---------|-------------|--------------|--------|--------|------|
+| **Micro Pump** | +5% to +15% | Any | 1.5x+ | BUY | Low |
+| **Mid Pump** | +15% to +30% | +25%+ | 2x+ | BUY/HOLD | Medium |
+| **Mega Pump** | +30% to +50% | +50%+ | 3x+ | HOLD/SELL | High |
+| **FOMO Spike** | +50%+ | Any | 5x+ | DO NOT BUY | Extreme |
+| **Accumulation** | +1% to +5% | +10%+ | Normal | BUY | Low |
+| **Distribution** | -1% to -5% | -10%+ | Normal | SELL | Medium |
+| **Dump** | -15% to -30% | Any | 2x+ | SELL | High |
+| **Rug Pull** | -50%+ | Any | Any | EMERGENCY EXIT | Critical |
+| **Dead Cat Bounce** | +10% after dump | Any | Low | DO NOT BUY | High |
+
+### Risk Management Defaults
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| Stop Loss | 10% | Exit if price drops 10% from entry |
+| Trailing Stop | 8% | Trail by 8% from highest price |
+| Trailing Activation | 5% | Activate trailing after 5% profit |
+| Take Profit | 25% | Exit at 25% profit |
+| Partial Take 1 | 15% | Take 25% of position at 15% profit |
+| Partial Take 2 | 30% | Take 25% of position at 30% profit |
+| Partial Take 3 | 50% | Take 25% of position at 50% profit |
+| Emergency Exit | -30% | Immediate exit, bypass pipeline |
+| Rug Detection | -50% | Instant exit, max slippage 10% |
 
 ---
 
-## Trade Agent Pipeline (LangGraph)
+## Standard Mode (Legacy)
 
-When `trade-agent` runs for a user, it executes this pipeline:
+For stable coins or longer-term positions:
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│                    LangGraph Pipeline                        │
+│                 STANDARD MODE PIPELINE                        │
 ├──────────────────────────────────────────────────────────────┤
 │                                                              │
-│  1. LOAD_CONTEXT                                             │
-│     └─ Read user snapshot from SQLite                        │
-│     └─ Read news_signals for user's tokens                   │
-│     └─ Read trend_signals for user's tokens                  │
-│     └─ Read rule_evaluations for user                        │
-│                        ▼                                     │
-│  2. PREPROCESS                                               │
-│     └─ Calculate portfolio value                             │
-│     └─ Determine deployable capital (25% of portfolio)       │
-│     └─ Count today's trades                                  │
-│                        ▼                                     │
-│  3. RULE_CHECK                                               │
-│     └─ Check: Has user exceeded daily trade limit?           │
-│     └─ Check: Which tokens is user allowed to trade?         │
-│     └─ Check: What are position size limits?                 │
-│                        ▼                                     │
-│  4. SENTIMENT                                                │
-│     └─ Aggregate news sentiment scores                       │
-│     └─ Average confidence across sources                     │
-│                        ▼                                     │
-│  5. ML_SIGNAL                                                │
-│     └─ Run ML model (or fallback to rules)                   │
-│     └─ Predict: action (buy/sell/hold)                       │
-│     └─ Predict: which token                                  │
-│     └─ Predict: amount                                       │
-│                        ▼                                     │
-│  6. RISK_MANAGER                                             │
-│     └─ Validate ML signal against rules                      │
-│     └─ Cap amount to max allowed                             │
-│     └─ Apply hard stops if needed                            │
-│                        ▼                                     │
-│  7. DECISION                                                 │
-│     └─ (Optional) Call Gemini AI for final fusion            │
-│     └─ Generate final TradeDecision                          │
-│                        ▼                                     │
-│  8. EXECUTION                                                │
-│     └─ If confidence > threshold (0.7):                      │
-│        └─ Call /api/tokens/buy or /api/tokens/sell           │
-│     └─ Log trade to SQLite (trade_executions table)          │
+│  1. fetch-data-agent (every 30 min)                          │
+│     └─ Fetches from nuahchain-backend → SQLite               │
+│                                                              │
+│  2. Analysis Agents (every 35-40 min)                        │
+│     ├─ news-agent:  Sentiment analysis                       │
+│     ├─ trend-agent: Price trend analysis                     │
+│     └─ rules-agent: Trading rules evaluation                 │
+│                                                              │
+│  3. trade-agent LangGraph Pipeline                           │
+│     ├─ load_context: Read all signals                        │
+│     ├─ preprocess:   Calculate features                      │
+│     ├─ rule_check:   Apply trading rules                     │
+│     ├─ sentiment:    Aggregate news sentiment                │
+│     ├─ ml_signal:    ML/rule prediction                      │
+│     ├─ risk_manager: Apply position limits                   │
+│     ├─ decision:     Gemini LLM fusion                       │
+│     └─ execution:    Execute or dry-run                      │
 │                                                              │
 └──────────────────────────────────────────────────────────────┘
 ```
 
-### Pipeline Nodes Explained
-
-| Node | Purpose | Input | Output |
-|------|---------|-------|--------|
-| load_context | Gather all data for user | user_id | snapshot, signals |
-| preprocess | Calculate features | snapshot | features dict |
-| rule_check | Apply trading rules | features, rules | allowed_tokens, hard_stop |
-| sentiment | Aggregate news sentiment | news_signals | sentiment score |
-| ml_signal | Generate ML prediction | all above | TradeDecision candidate |
-| risk_manager | Apply risk limits | ml_signal, rules | adjusted amount |
-| decision | Final decision fusion | all above | final TradeDecision |
-| execution | Execute or log trade | decision | API call or dry-run log |
-
 ---
 
-## Multi-User, Multi-Coin Trading Flow
+## Running the Agent
 
-When processing multiple users, each with multiple coins:
-
-```
-┌────────────────────────────────────────────────────────────────────────────┐
-│ EXAMPLE: 3 Users with 5 Coins Each                                         │
-├────────────────────────────────────────────────────────────────────────────┤
-│                                                                            │
-│ USER 1: Owns [MEME, DOGE, PEPE, SHIB, BONK]                               │
-│ ───────────────────────────────────────────                               │
-│ • Pipeline analyzes ALL 5 tokens                                          │
-│ • MEME has highest trend_score (0.8)                                      │
-│ • Decision: BUY MEME, amount=100, confidence=0.75                         │
-│ • Logged to trade_executions table                                        │
-│                                                                            │
-│ USER 2: Owns [DOGE, WIF, BRETT, POPCAT, TURBO]                            │
-│ ──────────────────────────────────────────────                            │
-│ • Pipeline analyzes ALL 5 tokens                                          │
-│ • WIF has negative sentiment (-0.3)                                       │
-│ • Decision: SELL WIF, amount=50, confidence=0.65                          │
-│ • Logged to trade_executions table                                        │
-│                                                                            │
-│ USER 3: Owns [PEPE, SHIB, FLOKI, MOG, NEIRO]                              │
-│ ────────────────────────────────────────────                              │
-│ • Portfolio value < 50 N-Dollar (minimum threshold)                       │
-│ • Decision: HOLD, reason="Insufficient balance"                           │
-│ • Logged to trade_executions table (status=skipped)                       │
-│                                                                            │
-└────────────────────────────────────────────────────────────────────────────┘
-```
-
-### Token Selection Logic
-
-| Scenario | Token Selection Method |
-|----------|------------------------|
-| **Buy Signal** | Pick token with **highest trend_score** from trend_signals |
-| **Sell Signal** | Pick token with **highest value** in user's portfolio |
-| **Portfolio Saturated** | Sell the **richest position** to rebalance |
-| **No Trend Data** | Pick token with **lowest risk_score** from catalog |
-
-### Database Result (trade_executions)
-
-| trade_id | user_id | token_mint | action | amount | confidence | status |
-|----------|---------|------------|--------|--------|------------|--------|
-| TRADE-abc123 | 1 | MEME | buy | 100 | 0.75 | completed |
-| TRADE-def456 | 2 | WIF | sell | 50 | 0.65 | completed |
-| TRADE-ghi789 | 3 | NULL | hold | NULL | 0.40 | skipped |
-
----
-
-## Example Trade Decision
-
-For user 1 with test coins:
-
-```python
-TradeDecision {
-    user_id: 1,
-    action: "buy",                                    # buy/sell/hold
-    token_mint: "factory/.../TBTC",                   # Which token
-    amount: 10.5,                                     # How much N$
-    confidence: 0.85,                                 # 0.0-1.0
-    reason: "Bullish trend + positive news sentiment"
-}
-```
-
-### Execution Modes
-
-**Dry Run Mode** (`DRY_RUN=true`):
-```
-[Dry Run] Would execute buy factory/.../TBTC qty=10.5
-```
-
-**Live Mode** (`DRY_RUN=false`):
-```http
-POST /api/tokens/buy
-{
-    "denom": "factory/nuah.../TBTC",
-    "payment_amount": "10500000"  # 10.5 * 1,000,000 micro-units
-}
-```
-
----
-
-## Token Denom Mapping
-
-The system maps between human-readable symbols and blockchain denoms:
-
-| Symbol | Denom (Blockchain Format) |
-|--------|---------------------------|
-| TBTC | `factory/nuah10e2dde1b41cbeeca5a700c828df18759381f61c7/TBTC` |
-| TETH | `factory/nuah10e2dde1b41cbeeca5a700c828df18759381f61c7/TETH` |
-| TSOL | `factory/nuah10e2dde1b41cbeeca5a700c828df18759381f61c7/TSOL` |
-| TADA | `factory/nuah10e2dde1b41cbeeca5a700c828df18759381f61c7/TADA` |
-| TDOT | `factory/nuah10e2dde1b41cbeeca5a700c828df18759381f61c7/TDOT` |
-
-The `denom_mapper.py` in `shared/` handles these conversions.
-
----
-
-## Running the System
-
-### Prerequisites
-
-1. **nuahchain-backend running** on localhost:8080
-2. **PostgreSQL** with database `serverdb`
-3. **JWT Token** for authentication
-4. **Python** installed with agent dependencies
-
-### Start Commands (All Agents with Schedulers)
-
-Each agent has its own scheduler. Start each in a separate terminal:
+### Fast Mode (Recommended for pump.fun)
 
 ```powershell
-# Terminal 1: Start nuahchain-backend
-cd C:\Users\Abhinav Saxena\Desktop\nuahchain-backend
-./build/server.exe
-
-# Terminal 2: fetch-data-agent (fetches every 30 min)
-cd C:\Users\Abhinav Saxena\Desktop\NUAH\fetch-data-agent
-$env:NUAHCHAIN_API_TOKEN="your_jwt_token"
-npm run dev
-
-# Terminal 3: news-agent (runs every 35 min)
-cd C:\Users\Abhinav Saxena\Desktop\NUAH\news-agent
-python scheduler.py
-
-# Terminal 4: trend-agent (runs every 35 min)
-cd C:\Users\Abhinav Saxena\Desktop\NUAH\trend-agent
-python scheduler.py
-
-# Terminal 5: rules-agent (runs every 40 min)
-cd C:\Users\Abhinav Saxena\Desktop\NUAH\rules-agent
-python scheduler.py
-
-# Terminal 6: trade-agent (runs every 40 min)
 cd C:\Users\Abhinav Saxena\Desktop\NUAH\trade-agent
-$env:API_TOKEN="your_jwt_token"
-$env:DRY_RUN="true"
-python scheduler.py
+
+# Fast mode with 5 agent users
+python main.py --mode fast --user-ids 1,2,3,4,5
+
+# Fast mode with dry run (testing)
+python main.py --mode fast --user-ids 1,2,3,4,5 --dry-run
+
+# Fast mode for 1 hour
+python main.py --mode fast --user-ids 1,2,3,4,5 --duration 3600
 ```
 
-### Agent Schedule Intervals
-
-| Agent | Interval | Purpose |
-|-------|----------|---------|
-| fetch-data-agent | 30 min | Fetches user data from nuahchain-backend |
-| news-agent | 35 min | Analyzes news sentiment |
-| trend-agent | 35 min | Analyzes price trends |
-| rules-agent | 40 min | Evaluates trading rules |
-| trade-agent | 40 min | Makes and executes trade decisions |
-
-### Run Once (Testing)
-
-To run each agent once for testing:
+### Standard Mode
 
 ```powershell
-# fetch-data-agent - run once
-cd C:\Users\Abhinav Saxena\Desktop\NUAH\fetch-data-agent
-$env:NUAHCHAIN_API_TOKEN="your_jwt_token"
-npx ts-node src/index.ts --run-now
+# Standard mode (single run)
+python main.py --mode standard --user-ids 1,2,3,4,5
 
-# news-agent - run once
-cd C:\Users\Abhinav Saxena\Desktop\NUAH\news-agent
-python scheduler.py --run-once
-
-# trend-agent - run once
-cd C:\Users\Abhinav Saxena\Desktop\NUAH\trend-agent
-python scheduler.py --run-once
-
-# rules-agent - run once
-cd C:\Users\Abhinav Saxena\Desktop\NUAH\rules-agent
-python scheduler.py --run-once
-
-# trade-agent - run once
-cd C:\Users\Abhinav Saxena\Desktop\NUAH\trade-agent
-$env:API_TOKEN="your_jwt_token"
-$env:DRY_RUN="true"
-python main.py --user-ids 1
+# Standard mode with scheduler
+python scheduler.py --interval-minutes 30
 ```
 
-### Generate Test Data
+### Environment Variables
 
-```powershell
-cd C:\Users\Abhinav Saxena\Desktop\nuahchain-backend
-go run ./cmd/seed_test_data
+```bash
+# Required
+API_BASE_URL=http://localhost:8080
+API_TOKEN=your_jwt_token
+
+# Fast Mode Tuning
+PRICE_POLL_INTERVAL_SECONDS=5
+DECISION_INTERVAL_SECONDS=15
+STOP_LOSS_PERCENT=0.10
+TRAILING_STOP_PERCENT=0.08
+TAKE_PROFIT_PERCENT=0.25
+
+# Mode Selection
+TRADING_MODE=fast  # or 'standard'
+FAST_MODE_ENABLED=true
+DRY_RUN=true
 ```
 
-This creates:
-- 1 test user (testbyabhinav@gmail.com)
-- 1 wallet
-- 5 test coins (TBTC, TETH, TSOL, TADA, TDOT)
-- JWT token for authentication
+---
+
+## Data Flow Comparison
+
+### Standard Mode
+
+```
+nuahchain-backend → fetch-data-agent (30m) → SQLite → trade-agent (40m) → Execute
+                                                  ↑
+                              news/trend/rules agents write signals
+```
+
+### Fast Mode
+
+```
+nuahchain-backend ←→ Price Monitor (5s) → Pattern Detector → Risk Guard → Execute
+                                                                    ↓
+                                                          Emergency Exit (if needed)
+```
+
+---
+
+## Key Differences
+
+| Aspect | Standard Mode | Fast Mode |
+|--------|--------------|-----------|
+| **Cycle Time** | 30-60 minutes | 5-15 seconds |
+| **Data Source** | SQLite snapshots | Live API polling |
+| **Decision Logic** | ML + LLM fusion | Pattern rules |
+| **Risk Management** | Manual rules | Automated stop-loss |
+| **Exit Speed** | Full pipeline | Instant (bypass) |
+| **Best For** | Stable coins | Meme coins, pump.fun |
+
+---
+
+## File Structure
+
+```
+trade-agent/
+├── main.py                      # Entry point (supports both modes)
+├── scheduler.py                 # Standard mode scheduler
+├── src/
+│   ├── config.py               # Configuration (both modes)
+│   ├── pipeline/
+│   │   ├── trade_pipeline.py   # Standard LangGraph pipeline
+│   │   └── fast_pipeline.py    # Fast mode pipeline
+│   ├── realtime/               # Fast mode components
+│   │   ├── price_monitor.py    # Real-time price tracking
+│   │   ├── pattern_detector.py # Pump/dump detection
+│   │   ├── risk_guard.py       # Automated stop-loss
+│   │   └── emergency_exit.py   # Fast-path exits
+│   ├── models/
+│   │   ├── ml_predictor.py     # ML predictions
+│   │   ├── rule_evaluator.py   # Rule-based decisions
+│   │   └── feature_engineer.py # Feature extraction
+│   └── execution/
+│       └── ndollar_client.py   # Trade execution
+```
 
 ---
 
 ## Testing
 
-### Test fetch-data-agent
+### Test with Simulation Framework
 
 ```powershell
-cd C:\Users\Abhinav Saxena\Desktop\NUAH\fetch-data-agent
-$env:NUAHCHAIN_API_TOKEN="your_jwt_token"
-npx ts-node src/test-api.ts
+cd C:\Users\Abhinav Saxena\Desktop\NUAH\testing
+
+# Generate test data (100 coins, 1000 users)
+python run_simulation.py --generate-only
+
+# Run backtest with fast mode patterns
+python run_simulation.py --backtest
+
+# Full simulation
+python run_simulation.py --coins 100 --users 1000 --hours 24
 ```
 
-### Test trade-agent
+### Test Fast Mode with Dry Run
 
 ```powershell
 cd C:\Users\Abhinav Saxena\Desktop\NUAH\trade-agent
-$env:API_TOKEN="your_jwt_token"
-$env:DRY_RUN="true"
-python test_integration.py
+
+# 5-minute test run
+python main.py --mode fast --user-ids 1,2,3,4,5 --dry-run --duration 300
 ```
 
 ---
 
-## Quick Reference
+## Performance Targets
 
-| Question | Answer |
-|----------|--------|
-| **What is a snapshot?** | Point-in-time capture of user's balances, transactions, portfolio value |
-| **Where is data saved?** | SQLite database at `fetch-data-agent/data/user_data.db` |
-| **Why SQLite?** | Fast local storage, all agents can read without network calls |
-| **How does trade-agent decide?** | LangGraph pipeline: rules → sentiment → ML → risk → execute |
-| **What's the confidence threshold?** | 0.7 (70%) - trades below this are skipped |
-| **How often does fetch run?** | Every 30 minutes by default |
-| **What triggers a trade?** | High confidence signal + allowed by rules + under risk limits |
-| **How many users processed?** | ALL users (no limit) - processed in batches of 50 |
-| **Where are trades logged?** | `trade_executions` table in SQLite (not CSV) |
-| **How is one coin selected?** | Highest trend_score for buy, highest value for sell |
+| Metric | Target | Measured |
+|--------|--------|----------|
+| Price poll latency | <100ms | - |
+| Pattern detection | <10ms | - |
+| Stop-loss trigger | <50ms | - |
+| Emergency exit | <1 second | - |
+| Full decision cycle | <15 seconds | - |
 
 ---
 
-## File Locations
+## Monitoring
 
+The fast pipeline logs:
+- Every pattern detected
+- All stop-loss/take-profit triggers
+- Emergency exit executions
+- Decision statistics
+
+Check logs at:
 ```
-NUAH/
-├── fetch-data-agent/
-│   ├── data/
-│   │   └── user_data.db          # SQLite database (snapshots)
-│   ├── src/
-│   │   ├── services/
-│   │   │   ├── apiClient.ts      # API calls to nuahchain-backend
-│   │   │   └── userDataService.ts
-│   │   └── test-api.ts           # Test script
-│   └── package.json
-│
-├── trade-agent/
-│   ├── src/
-│   │   ├── pipeline/
-│   │   │   └── trade_pipeline.py # LangGraph pipeline
-│   │   ├── execution/
-│   │   │   └── ndollar_client.py # Trade execution
-│   │   └── data_ingestion/
-│   │       └── sqlite_loader.py  # Read from SQLite
-│   ├── test_integration.py       # Test script
-│   └── requirements.txt
-│
-├── shared/
-│   ├── nuahchain_client.py       # Shared API client
-│   └── denom_mapper.py           # Token denom mapping
-│
-└── nuahchain-backend/
-    ├── cmd/
-    │   └── seed_test_data/
-    │       └── main.go           # Test data generator
-    ├── api/
-    │   └── router.go             # API routes
-    └── tokens/
-        └── repository.go         # Token storage
+trade-agent/logs/
 ```
-
----
-
-## Troubleshooting
-
-| Issue | Solution |
-|-------|----------|
-| "No snapshot available" | Run fetch-data-agent first to populate SQLite |
-| "API_TOKEN not set" | Set `$env:API_TOKEN="your_jwt"` in PowerShell |
-| "Connection refused" | Ensure nuahchain-backend is running on :8080 |
-| "Invalid token" | JWT expired - regenerate with `go run ./cmd/seed_test_data` |
-| "No tokens in marketplace" | Tokens are in DB but not on blockchain (expected for test data) |
 
 ---
 
 *Document updated: December 9, 2025*
-*System: NUAH Multi-Agent Trading Platform*
-*Features: Batch processing, SQLite trade logging, multi-user multi-coin support*
-
+*System: NUAH Multi-Agent Trading Platform v2.0*
+*Features: Fast mode (pump.fun), automated risk management, pattern detection*
