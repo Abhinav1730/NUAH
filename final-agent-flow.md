@@ -17,7 +17,7 @@
 │                        fetch-data-agent (TypeScript)                        │
 │  • Fetches user data from nuahchain-backend                                 │
 │  • Stores SNAPSHOTS in SQLite database                                      │
-│  • Runs on schedule (every 20 minutes)                                      │
+│  • Runs on schedule (every 30 minutes)                                      │
 └─────────────────────────────────────────────────────────────────────────────┘
                                     │
                                     │ Writes to SQLite
@@ -82,7 +82,7 @@ User registers → Creates wallet → Can create/buy/sell tokens
 ### Step 2: fetch-data-agent (Data Collector)
 
 ```
-Every 20 minutes:
+Every 30 minutes:
     │
     ▼
 ┌─────────────────────────────────────────┐
@@ -233,7 +233,89 @@ CREATE TABLE user_preferences (
     max_trades_per_day INTEGER,
     risk_level TEXT            -- "low", "medium", "high"
 );
+
+-- Trade executions (logged by trade-agent)
+CREATE TABLE trade_executions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    trade_id TEXT UNIQUE NOT NULL,    -- e.g., "TRADE-abc123"
+    user_id INTEGER NOT NULL,
+    token_mint TEXT,                  -- NULL for hold actions
+    action TEXT NOT NULL,             -- "buy", "sell", "hold"
+    amount TEXT,
+    price TEXT,
+    timestamp TIMESTAMP NOT NULL,
+    pnl TEXT,                         -- Profit/Loss (if calculated)
+    slippage TEXT,
+    risk_score REAL,
+    confidence REAL,                  -- 0.0 to 1.0
+    reason TEXT,                      -- Why this decision was made
+    status TEXT DEFAULT 'completed',  -- completed, failed, simulated, skipped
+    tx_hash TEXT,                     -- Blockchain transaction hash
+    error_message TEXT,               -- Error if failed
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
 ```
+
+---
+
+## Trade Agent: Batch Processing (All Users)
+
+The trade-agent processes **ALL users** in the database using batch processing:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        TRADE-AGENT BATCH PROCESSING                         │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  1. DISCOVER ALL USERS                                                      │
+│     └─ SELECT * FROM users (NO LIMIT)                                       │
+│     └─ Example: Found 500 users                                             │
+│                                                                             │
+│  2. SPLIT INTO BATCHES                                                      │
+│     └─ BATCH_SIZE = 50 (configurable)                                       │
+│     └─ 500 users ÷ 50 = 10 batches                                          │
+│                                                                             │
+│  3. PROCESS EACH BATCH                                                      │
+│     ┌─────────────────────────────────────────────────────────────────┐     │
+│     │ 📦 Batch 1/10: Users 1-50                                       │     │
+│     │    ├─ User 1  → Pipeline → Decision → Log to DB                 │     │
+│     │    ├─ User 2  → Pipeline → Decision → Log to DB                 │     │
+│     │    └─ ... (48 more users)                                       │     │
+│     │                                                                 │     │
+│     │ ⏳ Wait 5 seconds (BATCH_DELAY_SECONDS)                         │     │
+│     │                                                                 │     │
+│     │ 📦 Batch 2/10: Users 51-100                                     │     │
+│     │    └─ ... process users ...                                     │     │
+│     │                                                                 │     │
+│     │ ⏳ Wait 5 seconds                                               │     │
+│     │                                                                 │     │
+│     │ ... (8 more batches)                                            │     │
+│     │                                                                 │     │
+│     │ 📦 Batch 10/10: Users 451-500                                   │     │
+│     │    └─ ... process users ...                                     │     │
+│     └─────────────────────────────────────────────────────────────────┘     │
+│                                                                             │
+│  4. COMPLETION SUMMARY                                                      │
+│     └─ ✅ Pipeline complete: 500 total, 120 processed, 375 skipped, 5 failed│
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Batch Processing Configuration
+
+| Environment Variable | Default | Description |
+|---------------------|---------|-------------|
+| `BATCH_SIZE` | 50 | Users processed per batch. Set to `0` for no batching |
+| `BATCH_DELAY_SECONDS` | 5 | Seconds to wait between batches |
+
+### Scaling Examples
+
+| Users | Batch Size | Batches | Approx Time |
+|-------|------------|---------|-------------|
+| 100 | 50 | 2 | ~15 seconds |
+| 500 | 50 | 10 | ~1-2 minutes |
+| 1000 | 50 | 20 | ~3-5 minutes |
+| 5000 | 100 | 50 | ~10-15 minutes |
 
 ---
 
@@ -284,7 +366,7 @@ When `trade-agent` runs for a user, it executes this pipeline:
 │  8. EXECUTION                                                │
 │     └─ If confidence > threshold (0.7):                      │
 │        └─ Call /api/tokens/buy or /api/tokens/sell           │
-│     └─ Log trade to audit file                               │
+│     └─ Log trade to SQLite (trade_executions table)          │
 │                                                              │
 └──────────────────────────────────────────────────────────────┘
 ```
@@ -301,6 +383,57 @@ When `trade-agent` runs for a user, it executes this pipeline:
 | risk_manager | Apply risk limits | ml_signal, rules | adjusted amount |
 | decision | Final decision fusion | all above | final TradeDecision |
 | execution | Execute or log trade | decision | API call or dry-run log |
+
+---
+
+## Multi-User, Multi-Coin Trading Flow
+
+When processing multiple users, each with multiple coins:
+
+```
+┌────────────────────────────────────────────────────────────────────────────┐
+│ EXAMPLE: 3 Users with 5 Coins Each                                         │
+├────────────────────────────────────────────────────────────────────────────┤
+│                                                                            │
+│ USER 1: Owns [MEME, DOGE, PEPE, SHIB, BONK]                               │
+│ ───────────────────────────────────────────                               │
+│ • Pipeline analyzes ALL 5 tokens                                          │
+│ • MEME has highest trend_score (0.8)                                      │
+│ • Decision: BUY MEME, amount=100, confidence=0.75                         │
+│ • Logged to trade_executions table                                        │
+│                                                                            │
+│ USER 2: Owns [DOGE, WIF, BRETT, POPCAT, TURBO]                            │
+│ ──────────────────────────────────────────────                            │
+│ • Pipeline analyzes ALL 5 tokens                                          │
+│ • WIF has negative sentiment (-0.3)                                       │
+│ • Decision: SELL WIF, amount=50, confidence=0.65                          │
+│ • Logged to trade_executions table                                        │
+│                                                                            │
+│ USER 3: Owns [PEPE, SHIB, FLOKI, MOG, NEIRO]                              │
+│ ────────────────────────────────────────────                              │
+│ • Portfolio value < 50 N-Dollar (minimum threshold)                       │
+│ • Decision: HOLD, reason="Insufficient balance"                           │
+│ • Logged to trade_executions table (status=skipped)                       │
+│                                                                            │
+└────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Token Selection Logic
+
+| Scenario | Token Selection Method |
+|----------|------------------------|
+| **Buy Signal** | Pick token with **highest trend_score** from trend_signals |
+| **Sell Signal** | Pick token with **highest value** in user's portfolio |
+| **Portfolio Saturated** | Sell the **richest position** to rebalance |
+| **No Trend Data** | Pick token with **lowest risk_score** from catalog |
+
+### Database Result (trade_executions)
+
+| trade_id | user_id | token_mint | action | amount | confidence | status |
+|----------|---------|------------|--------|--------|------------|--------|
+| TRADE-abc123 | 1 | MEME | buy | 100 | 0.75 | completed |
+| TRADE-def456 | 2 | WIF | sell | 50 | 0.65 | completed |
+| TRADE-ghi789 | 3 | NULL | hold | NULL | 0.40 | skipped |
 
 ---
 
@@ -479,8 +612,11 @@ python test_integration.py
 | **Why SQLite?** | Fast local storage, all agents can read without network calls |
 | **How does trade-agent decide?** | LangGraph pipeline: rules → sentiment → ML → risk → execute |
 | **What's the confidence threshold?** | 0.7 (70%) - trades below this are skipped |
-| **How often does fetch run?** | Every 20 minutes by default |
+| **How often does fetch run?** | Every 30 minutes by default |
 | **What triggers a trade?** | High confidence signal + allowed by rules + under risk limits |
+| **How many users processed?** | ALL users (no limit) - processed in batches of 50 |
+| **Where are trades logged?** | `trade_executions` table in SQLite (not CSV) |
+| **How is one coin selected?** | Highest trend_score for buy, highest value for sell |
 
 ---
 
@@ -537,6 +673,7 @@ NUAH/
 
 ---
 
-*Document generated: December 9, 2025*
+*Document updated: December 9, 2025*
 *System: NUAH Multi-Agent Trading Platform*
+*Features: Batch processing, SQLite trade logging, multi-user multi-coin support*
 
