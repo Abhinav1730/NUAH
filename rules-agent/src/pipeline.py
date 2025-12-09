@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import logging
 import sqlite3
 from datetime import datetime, timezone
@@ -109,21 +110,76 @@ class RulesAgentPipeline:
 
     # ------------------------------------------------------------------ helpers
     def _build_prompt(self, pref_row, token_contexts: List[Dict]) -> tuple[str, str]:
-        system_prompt = (
-            "You are a risk-policy translator. Given user preferences and token analytics, "
-            "decide per token: allowed (bool), max_daily_trades, max_position_ndollar, reason, confidence (0..1). "
-            "Respond with JSON array."
-        )
+        system_prompt = """You are a pump.fun risk manager. Your job is to protect users while allowing profitable meme coin trades.
+
+PUMP.FUN RISK ASSESSMENT:
+
+RUG PULL INDICATORS (BLOCK if multiple present):
+- Whale concentration > 40%: Single holder can dump
+- Low liquidity + high volatility: Easy manipulation
+- New token (<1 hour) with huge gains: Classic pump & dump setup
+- Risk score > 0.9: Extreme danger
+
+POSITION SIZING RULES:
+- Aggressive user: Up to 20% of portfolio per token
+- Balanced user: Up to 10% of portfolio per token
+- Conservative user: Up to 5% of portfolio per token
+- For tokens with rug_risk > 0.5: Halve the position size
+- For new/untested tokens: Max 50 NDOLLAR regardless of profile
+
+TRADE FREQUENCY RULES (pump.fun is FAST):
+- Aggressive: 20 trades/day allowed (need to catch multiple pumps)
+- Balanced: 10 trades/day allowed
+- Conservative: 5 trades/day allowed
+
+EMERGENCY OVERRIDES:
+- If rug_risk > 0.7: Force allowed=false regardless of user preference
+- If user owns token AND momentum < -0.2: Allow sell regardless of limits
+- If bonding curve stage = "late" AND momentum > 0.3: Allow entry for graduation play
+
+Respond ONLY with JSON array:
+[{
+  "token_mint": "...",
+  "evaluation_id": "RULE-{user_id}-{token}",
+  "allowed": true/false,
+  "max_daily_trades": number,
+  "max_position_ndollar": number,
+  "rug_risk_assessment": "low|medium|high|extreme",
+  "reason": "Brief explanation",
+  "confidence": 0.0-1.0,
+  "emergency_exit_enabled": true/false
+}]"""
+
+        risk_profile = pref_row.get('risk_profile', 'balanced')
+        
+        # Adjust defaults based on risk profile for pump.fun
+        if risk_profile == 'aggressive':
+            default_trades = 20
+            default_position = 2000
+        elif risk_profile == 'conservative':
+            default_trades = 5
+            default_position = 500
+        else:  # balanced
+            default_trades = 10
+            default_position = 1000
+        
         pref_text = (
             f"user_id={pref_row['user_id']}, "
-            f"risk_profile={pref_row.get('risk_profile','balanced')}, "
-            f"max_trades_per_day={pref_row.get('max_trades_per_day',3)}, "
-            f"max_position_ndollar={pref_row.get('max_position_ndollar',1000)}"
+            f"risk_profile={risk_profile}, "
+            f"max_trades_per_day={pref_row.get('max_trades_per_day', default_trades)}, "
+            f"max_position_ndollar={pref_row.get('max_position_ndollar', default_position)}"
         )
-        user_prompt = (
-            f"User preferences: {pref_text}\n"
-            f"Tokens with metrics:\n{json.dumps(token_contexts, ensure_ascii=False, indent=2)}"
-        )
+        
+        user_prompt = f"""Evaluate these tokens for user trading permissions:
+
+User preferences: {pref_text}
+
+Token metrics:
+{json.dumps(token_contexts, indent=2)}
+
+Remember: This is pump.fun trading. Be protective against rugs but permissive for legitimate pumps.
+Enable emergency_exit for any token with rug_risk > 0.3."""
+
         return system_prompt, user_prompt
 
     def _write_evaluations(self, rows: List[Dict]) -> None:

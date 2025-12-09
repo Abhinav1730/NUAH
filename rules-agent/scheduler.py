@@ -2,11 +2,11 @@
 """
 Scheduler for rules-agent
 
-Runs the rules evaluation pipeline on a configurable schedule.
-Coordinates with fetch-data-agent by checking data freshness.
+Runs the rules evaluation pipeline on a fast schedule for meme coin trading.
+Optimized for pump.fun-style rapid market movements.
 
 Usage:
-    python scheduler.py --interval-minutes 20 --initial-delay-minutes 4
+    python scheduler.py --interval-minutes 5 --initial-delay-minutes 2
 """
 
 from __future__ import annotations
@@ -26,19 +26,19 @@ logger = logging.getLogger("rules-agent-scheduler")
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Schedule rules-agent runs."
+        description="Schedule rules-agent runs (pump.fun optimized)."
     )
     parser.add_argument(
         "--interval-minutes",
         type=int,
-        default=int(os.getenv("RULES_INTERVAL_MINUTES", "40")),
-        help="Minutes between runs (default: 20).",
+        default=int(os.getenv("RULES_INTERVAL_MINUTES", "5")),  # Changed: 40 -> 5 for pump.fun
+        help="Minutes between runs (default: 5 for pump.fun).",
     )
     parser.add_argument(
         "--initial-delay-minutes",
         type=int,
-        default=int(os.getenv("RULES_INITIAL_DELAY_MINUTES", "4")),
-        help="Delay before first run to let fetch-data-agent populate data (default: 4).",
+        default=int(os.getenv("RULES_INITIAL_DELAY_MINUTES", "2")),  # Changed: 4 -> 2
+        help="Delay before first run (default: 2).",
     )
     parser.add_argument(
         "--run-once",

@@ -2,11 +2,11 @@
 """
 Scheduler for news-agent
 
-Runs the news analysis pipeline on a configurable schedule.
-Coordinates with fetch-data-agent by checking data freshness.
+Runs the news analysis pipeline on a fast schedule for meme coin trading.
+Optimized for pump.fun-style rapid market movements.
 
 Usage:
-    python scheduler.py --interval-minutes 20 --initial-delay-minutes 2
+    python scheduler.py --interval-minutes 5 --initial-delay-minutes 1
 """
 
 from __future__ import annotations
@@ -26,19 +26,19 @@ logger = logging.getLogger("news-agent-scheduler")
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Schedule news-agent runs."
+        description="Schedule news-agent runs (pump.fun optimized)."
     )
     parser.add_argument(
         "--interval-minutes",
         type=int,
-        default=int(os.getenv("NEWS_INTERVAL_MINUTES", "35")),
-        help="Minutes between runs (default: 20).",
+        default=int(os.getenv("NEWS_INTERVAL_MINUTES", "5")),  # Changed: 35 -> 5 for pump.fun
+        help="Minutes between runs (default: 5 for pump.fun).",
     )
     parser.add_argument(
         "--initial-delay-minutes",
         type=int,
-        default=int(os.getenv("NEWS_INITIAL_DELAY_MINUTES", "2")),
-        help="Delay before first run to let fetch-data-agent populate data (default: 2).",
+        default=int(os.getenv("NEWS_INITIAL_DELAY_MINUTES", "1")),  # Changed: 2 -> 1
+        help="Delay before first run (default: 1).",
     )
     parser.add_argument(
         "--run-once",

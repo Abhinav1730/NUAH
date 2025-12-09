@@ -52,6 +52,10 @@ else:
 class Settings(BaseSettings):
     """
     Centralized configuration powered by pydantic.
+    
+    Supports two modes:
+    - Standard mode: Traditional interval-based trading (30-60 min cycles)
+    - Fast mode: pump.fun-style real-time trading (5-15 second cycles)
     """
 
     sqlite_path: Path = Field(
@@ -81,9 +85,21 @@ class Settings(BaseSettings):
         default=None,
         description="Optional list of user IDs that should be processed every run.",
     )
-    news_freshness_minutes: int = Field(default=45)
-    trend_freshness_minutes: int = Field(default=60)
-    snapshot_freshness_minutes: int = Field(default=30)
+    
+    # ========================================
+    # Trading Mode Configuration
+    # ========================================
+    trading_mode: str = Field(
+        default="fast",
+        description="Trading mode: 'standard' (30-60 min) or 'fast' (5-15 sec for pump.fun)",
+    )
+    
+    # ========================================
+    # Standard Mode Settings (traditional)
+    # ========================================
+    news_freshness_minutes: int = Field(default=15)  # Reduced from 45
+    trend_freshness_minutes: int = Field(default=10)  # Reduced from 60
+    snapshot_freshness_minutes: int = Field(default=5)  # Reduced from 30
     dry_run: bool = Field(default=False)
     
     # Batch processing settings
@@ -95,11 +111,77 @@ class Settings(BaseSettings):
         default=5,
         description="Seconds to wait between batches to avoid overloading.",
     )
+    
+    # ========================================
+    # Fast Mode Settings (pump.fun style)
+    # ========================================
+    fast_mode_enabled: bool = Field(
+        default=True,
+        description="Enable real-time monitoring and fast execution.",
+    )
+    price_poll_interval_seconds: float = Field(
+        default=5.0,
+        description="How often to poll prices in fast mode (seconds).",
+    )
+    decision_interval_seconds: float = Field(
+        default=15.0,
+        description="How often to make trading decisions in fast mode.",
+    )
+    
+    # Pattern detection thresholds
+    pump_threshold_1m: float = Field(
+        default=0.05,
+        description="1-minute price change to trigger pump detection (5%).",
+    )
+    dump_threshold_1m: float = Field(
+        default=-0.10,
+        description="1-minute price change to trigger dump detection (-10%).",
+    )
+    rug_threshold_1m: float = Field(
+        default=-0.50,
+        description="1-minute price change for rug pull detection (-50%).",
+    )
+    volume_spike_threshold: float = Field(
+        default=3.0,
+        description="Volume multiplier to consider a spike (3x normal).",
+    )
+    
+    # Risk management (fast mode)
+    stop_loss_percent: float = Field(
+        default=0.10,
+        description="Default stop loss percentage (10%).",
+    )
+    trailing_stop_percent: float = Field(
+        default=0.08,
+        description="Trailing stop percentage (8%).",
+    )
+    take_profit_percent: float = Field(
+        default=0.25,
+        description="Default take profit percentage (25%).",
+    )
+    emergency_exit_threshold: float = Field(
+        default=-0.30,
+        description="Price drop to trigger emergency exit (-30%).",
+    )
+    max_slippage: float = Field(
+        default=0.10,
+        description="Maximum acceptable slippage for fast trades (10%).",
+    )
+    
+    # ========================================
+    # LLM Settings
+    # ========================================
     gemini_api_key: Optional[str] = Field(
         default=None, description="Google Gemini API key for final decision fusion."
     )
     gemini_model: str = Field(default="gemini-2.5-pro")
-    decision_confidence_threshold: float = Field(default=0.7)
+    decision_confidence_threshold: float = Field(default=0.65)  # Reduced from 0.7 for faster action
+    
+    # Skip LLM in fast mode for speed
+    skip_llm_in_fast_mode: bool = Field(
+        default=True,
+        description="Skip Gemini LLM call in fast mode for speed.",
+    )
 
     class Config:
         env_file = ".env"

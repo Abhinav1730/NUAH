@@ -1,4 +1,5 @@
 // CRON scheduler for fetching user data
+// Runs every 5 minutes for fast meme coin trading
 import cron from 'node-cron';
 import { UserDataService } from './services/userDataService';
 
@@ -9,7 +10,8 @@ export class Scheduler {
 
   constructor(userDataService: UserDataService) {
     this.userDataService = userDataService;
-    this.intervalMinutes = parseInt(process.env.FETCH_INTERVAL_MINUTES || '30', 10);
+    // Changed: 30 -> 5 minutes for pump.fun fast trading
+    this.intervalMinutes = parseInt(process.env.FETCH_INTERVAL_MINUTES || '5', 10);
   }
 
   /**
