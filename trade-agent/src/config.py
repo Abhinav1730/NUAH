@@ -113,7 +113,7 @@ class Settings(BaseSettings):
     )
     
     # ========================================
-    # Fast Mode Settings (pump.fun style)
+    # Fast Mode Settings
     # ========================================
     fast_mode_enabled: bool = Field(
         default=True,
@@ -174,13 +174,23 @@ class Settings(BaseSettings):
     gemini_api_key: Optional[str] = Field(
         default=None, description="Google Gemini API key for final decision fusion."
     )
-    gemini_model: str = Field(default="gemini-2.5-pro")
+    gemini_model: str = Field(default="gemini-2.0-flash")
     decision_confidence_threshold: float = Field(default=0.65)  # Reduced from 0.7 for faster action
     
     # Skip LLM in fast mode for speed
     skip_llm_in_fast_mode: bool = Field(
         default=True,
         description="Skip Gemini LLM call in fast mode for speed.",
+    )
+    
+    # Token analyzer for scam detection (uses Gemini)
+    enable_token_analyzer: bool = Field(
+        default=True,
+        description="Enable Gemini-powered scam detection for new tokens.",
+    )
+    token_analyzer_cache_ttl: int = Field(
+        default=300,
+        description="How long to cache token analysis results (seconds).",
     )
 
     class Config:

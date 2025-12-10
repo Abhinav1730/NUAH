@@ -78,6 +78,10 @@ python main.py --user-ids 1,2,3,4,5 --dry-run
 │  │                    │ (cached)    │     │  Engine     │     │      ││   │
 │  │                    └─────────────┘     └──────┬──────┘     └──┬───┘│   │
 │  │                                               │               │    │   │
+│  │                    ┌─────────────┐            │               │    │   │
+│  │    NEW TOKEN? ────►│   GEMINI    │────────────┤               │    │   │
+│  │                    │ Scam Check  │  (block if SCAM/HIGH_RISK) │    │   │
+│  │                    └─────────────┘            │               │    │   │
 │  │                                               ▼               ▼    │   │
 │  │                                        ┌─────────────────────────┐ │   │
 │  │                                        │   EXECUTE TRADE         │ │   │
@@ -226,6 +230,28 @@ if pattern == MICRO_PUMP:
 | `PUMP_THRESHOLD_1M` | `0.05` | Pump detection |
 | `DUMP_THRESHOLD_1M` | `-0.10` | Dump detection |
 | `VOLUME_SPIKE_THRESHOLD` | `3.0` | Volume spike multiplier |
+
+### Gemini Scam Detection (Optional but Recommended)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `GEMINI_API_KEY` | - | Google Gemini API key for scam detection |
+| `GEMINI_MODEL` | `gemini-2.0-flash` | Gemini model (flash for speed) |
+| `ENABLE_TOKEN_ANALYZER` | `true` | Enable/disable scam detection |
+| `TOKEN_ANALYZER_CACHE_TTL` | `300` | Cache duration in seconds |
+
+**What it does**: When the agent sees a NEW token (not in trend_signals.csv), it calls Gemini to analyze:
+- Token name (copies of famous coins?)
+- Creator concentration (>30% = risky)
+- Holder count (<50 = risky)
+- Liquidity depth (<$5k = easy to manipulate)
+- Social presence (none = risky)
+- Price patterns (100%+ in 10 min = manipulation)
+
+**Result**: Returns risk level (SAFE, CAUTION, HIGH_RISK, SCAM) with:
+- Custom stop-loss suggestion
+- Max position % recommendation
+- Red/green flags list
 
 ---
 

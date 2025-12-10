@@ -54,6 +54,16 @@ from ..realtime import (
     EmergencyExit,
 )
 
+# Gemini-powered token analysis (for scam detection on new tokens)
+try:
+    from ..analysis import TokenAnalyzer, TokenAnalysis, RiskLevel, get_token_analyzer
+    HAS_TOKEN_ANALYZER = True
+except ImportError:
+    HAS_TOKEN_ANALYZER = False
+    TokenAnalyzer = None
+    TokenAnalysis = None
+    RiskLevel = None
+
 logger = logging.getLogger(__name__)
 
 
@@ -135,7 +145,198 @@ class FastTradePipeline:
             "emergency_exits": 0,
             "patterns_detected": {},
             "signals_used": {"news": 0, "trend": 0, "rules": 0},
+            "tokens_analyzed": 0,
+            "scams_blocked": 0,
         }
+        
+        # Gemini-powered token analyzer for scam detection
+        self._token_analyzer: Optional[TokenAnalyzer] = None
+        self._analyzed_tokens: Dict[str, TokenAnalysis] = {}  # Cache of analyzed tokens
+        self._known_tokens: Set[str] = set()  # Tokens we've seen before (no need to analyze)
+        
+        # Initialize token analyzer if Gemini key available
+        if HAS_TOKEN_ANALYZER and settings.gemini_api_key:
+            try:
+                self._token_analyzer = get_token_analyzer(
+                    gemini_api_key=settings.gemini_api_key,
+                    model=getattr(settings, 'gemini_model', 'gemini-2.0-flash'),
+                    timeout=10.0,
+                    cache_ttl_seconds=300,  # 5 min cache
+                )
+                logger.info("✅ Gemini token analyzer enabled for scam detection")
+            except Exception as e:
+                logger.warning(f"Could not initialize token analyzer: {e}")
+                self._token_analyzer = None
+        else:
+            logger.info("ℹ️ Token analyzer disabled (no Gemini API key or module not available)")
+    
+    # ==========================================================================
+    # GEMINI SCAM DETECTION
+    # ==========================================================================
+    
+    def _is_new_token(self, token_mint: str) -> bool:
+        """Check if this is a new/unknown token that needs analysis."""
+        # Already analyzed
+        if token_mint in self._analyzed_tokens:
+            return False
+        
+        # Already in our known safe list
+        if token_mint in self._known_tokens:
+            return False
+        
+        # Check if we have trend signals (means agents have seen it)
+        if token_mint in self._trend_signals:
+            self._known_tokens.add(token_mint)
+            return False
+        
+        return True
+    
+    def _analyze_new_token(
+        self,
+        token_mint: str,
+        price_update: Optional[PriceUpdate] = None
+    ) -> Optional[TokenAnalysis]:
+        """
+        Analyze a new token using Gemini for scam detection.
+        
+        This is called BEFORE considering a buy on unknown tokens.
+        Worth the 1-2s delay to avoid losing money to scams.
+        
+        Args:
+            token_mint: Token to analyze
+            price_update: Current price data if available
+            
+        Returns:
+            TokenAnalysis or None if analyzer not available
+        """
+        if not self._token_analyzer:
+            return None
+        
+        # Check cache first
+        if token_mint in self._analyzed_tokens:
+            analysis = self._analyzed_tokens[token_mint]
+            # Check if cache is still valid (5 minutes)
+            age = (datetime.now(timezone.utc) - analysis.analyzed_at).total_seconds()
+            if age < 300:
+                return analysis
+        
+        logger.info(f"🔍 Analyzing new token with Gemini: {token_mint}")
+        
+        # Build token data from available sources
+        token_data = self._gather_token_data(token_mint, price_update)
+        
+        try:
+            analysis = self._token_analyzer.analyze(
+                token_mint=token_mint,
+                token_data=token_data,
+                market_data=token_data.get("market_data"),
+                creator_data=token_data.get("creator_data"),
+            )
+            
+            # Cache result
+            self._analyzed_tokens[token_mint] = analysis
+            self.stats["tokens_analyzed"] += 1
+            
+            # Log result
+            if analysis.risk_level in [RiskLevel.SCAM, RiskLevel.HIGH_RISK]:
+                logger.warning(
+                    f"🚫 SCAM ALERT: {token_mint} | "
+                    f"Risk: {analysis.risk_level.value} | "
+                    f"Red flags: {', '.join(analysis.red_flags[:3])}"
+                )
+                self.stats["scams_blocked"] += 1
+            elif analysis.risk_level == RiskLevel.CAUTION:
+                logger.info(
+                    f"⚠️ CAUTION: {token_mint} | "
+                    f"Score: {analysis.risk_score:.2f} | "
+                    f"Max position: {analysis.max_position_percent*100:.1f}%"
+                )
+            else:
+                logger.info(
+                    f"✅ Token OK: {token_mint} | "
+                    f"Risk: {analysis.risk_level.value}"
+                )
+            
+            return analysis
+            
+        except Exception as e:
+            logger.error(f"Token analysis failed: {e}")
+            return None
+    
+    def _gather_token_data(
+        self,
+        token_mint: str,
+        price_update: Optional[PriceUpdate] = None
+    ) -> Dict[str, Any]:
+        """Gather all available data about a token for analysis."""
+        data = {
+            "token_mint": token_mint,
+        }
+        
+        # Add price data if available
+        if price_update:
+            data["current_price"] = price_update.price
+            data["volume"] = price_update.volume
+            data["price_change_1m"] = price_update.price_change_1m
+            data["price_change_5m"] = price_update.price_change_5m
+            data["momentum"] = price_update.momentum
+            data["volume_spike"] = price_update.volume_spike
+        
+        # Add trend signal data if available
+        trend = self._trend_signals.get(token_mint)
+        if trend:
+            data["bonding_curve_stage"] = trend.get("stage")
+            data["rug_risk"] = trend.get("rug_risk")
+            data["volatility_flag"] = trend.get("volatility_flag")
+            data["liquidity_flag"] = trend.get("liquidity_flag")
+        
+        # Add news signal data if available
+        news = self._news_signals.get(token_mint)
+        if news:
+            data["sentiment_score"] = news.get("sentiment_score")
+            data["catalyst"] = news.get("catalyst")
+        
+        # Try to get additional data from SQLite
+        try:
+            # This would fetch from market_data table
+            # Implementation depends on your schema
+            pass
+        except Exception:
+            pass
+        
+        return data
+    
+    def _should_block_trade(self, token_mint: str) -> tuple:
+        """
+        Check if a trade should be blocked based on token analysis.
+        
+        Returns:
+            (should_block: bool, reason: str, analysis: TokenAnalysis or None)
+        """
+        # No analyzer = don't block
+        if not self._token_analyzer:
+            return False, "", None
+        
+        # Get or perform analysis
+        analysis = self._analyzed_tokens.get(token_mint)
+        
+        if not analysis:
+            # Analyze if this is a new token
+            if self._is_new_token(token_mint):
+                analysis = self._analyze_new_token(token_mint)
+        
+        if not analysis:
+            return False, "", None
+        
+        # Block scams
+        if analysis.risk_level == RiskLevel.SCAM:
+            return True, f"SCAM detected: {analysis.summary}", analysis
+        
+        # Block high risk unless explicitly allowed
+        if analysis.risk_level == RiskLevel.HIGH_RISK and not analysis.should_trade:
+            return True, f"High risk token: {analysis.summary}", analysis
+        
+        return False, "", analysis
     
     # ==========================================================================
     # AGENT SIGNALS INTEGRATION
@@ -394,11 +595,44 @@ class FastTradePipeline:
         - Checks rules-agent for user permissions
         - Uses news-agent sentiment as confidence boost
         - Uses trend-agent for rug risk filtering
+        - Uses Gemini for scam detection on new tokens
         """
         token = signal.token_mint
         
         # Load latest agent signals
         self._load_agent_signals()
+        
+        # =====================================================
+        # GEMINI SCAM DETECTION - Check new tokens before entry
+        # =====================================================
+        if self._token_analyzer and self._is_new_token(token):
+            # Get price update for context
+            price_update = self.price_monitor.get_latest(token)
+            
+            # Analyze token with Gemini
+            analysis = self._analyze_new_token(token, price_update)
+            
+            if analysis:
+                # Block scams entirely
+                if analysis.risk_level == RiskLevel.SCAM:
+                    logger.warning(
+                        f"🚫 BLOCKED SCAM: {token} | {analysis.summary}"
+                    )
+                    return
+                
+                # Block high risk unless should_trade is True
+                if analysis.risk_level == RiskLevel.HIGH_RISK and not analysis.should_trade:
+                    logger.warning(
+                        f"⚠️ BLOCKED HIGH RISK: {token} | {analysis.summary}"
+                    )
+                    return
+                
+                # For caution-level tokens, we'll reduce position size below
+                logger.info(
+                    f"✅ Token analysis passed: {token} | "
+                    f"Risk: {analysis.risk_level.value} | "
+                    f"Max position: {analysis.max_position_percent*100:.0f}%"
+                )
         
         # Pre-check: Skip if high rug risk detected by trend-agent
         rug_risk = self.get_rug_risk(token)
@@ -428,11 +662,23 @@ class FastTradePipeline:
             pref_max = float(preferences.get("max_position_ndollar", 500))
             portfolio_value = context.get("portfolio_value", 0)
             
+            # Get max position from Gemini token analyzer (if available)
+            analyzer_max_percent = 0.10  # Default 10%
+            analyzer_stop_loss = None
+            if token in self._analyzed_tokens:
+                analysis = self._analyzed_tokens[token]
+                analyzer_max_percent = analysis.max_position_percent
+                analyzer_stop_loss = analysis.suggested_stop_loss
+                
+                # Extra reduction for caution-level tokens
+                if analysis.risk_level == RiskLevel.CAUTION:
+                    analyzer_max_percent *= 0.7  # 30% reduction
+            
             # Calculate position size (use smallest constraint)
             position_size = min(
                 rules_max,
                 pref_max,
-                portfolio_value * 0.10,  # Max 10% per position
+                portfolio_value * analyzer_max_percent,  # Gemini-recommended max
             )
             
             # Reduce position if rug risk is elevated
@@ -456,13 +702,14 @@ class FastTradePipeline:
         max_amount: float
     ) -> Optional[TradeDecision]:
         """
-        Make a fast trading decision using pattern + agent signals.
+        Make a fast trading decision using pattern + agent signals + Gemini analysis.
         
         Decision factors:
         1. Pattern signal (primary trigger)
         2. News sentiment (confidence boost/reduction)
         3. Trend stage (entry timing)
         4. Rug risk (position sizing)
+        5. Gemini token analysis (scam detection, risk level)
         """
         token = signal.token_mint
         pattern = signal.pattern
@@ -474,6 +721,33 @@ class FastTradePipeline:
         
         # Build decision context
         reasons = [f"Pattern: {pattern.value}"]
+        
+        # =====================================================
+        # GEMINI ANALYSIS INTEGRATION
+        # =====================================================
+        gemini_analysis = self._analyzed_tokens.get(token)
+        suggested_stop_loss = None
+        
+        if gemini_analysis:
+            # Adjust confidence based on Gemini risk assessment
+            if gemini_analysis.risk_level == RiskLevel.SAFE:
+                confidence = min(1.0, confidence + 0.10)
+                reasons.append(f"Gemini: SAFE ({gemini_analysis.risk_score:.2f})")
+            elif gemini_analysis.risk_level == RiskLevel.CAUTION:
+                confidence = max(0.0, confidence - 0.10)
+                reasons.append(f"Gemini: CAUTION ({gemini_analysis.risk_score:.2f})")
+            elif gemini_analysis.risk_level == RiskLevel.HIGH_RISK:
+                confidence = max(0.0, confidence - 0.25)
+                reasons.append(f"Gemini: HIGH_RISK ({gemini_analysis.risk_score:.2f})")
+            
+            # Use Gemini's suggested stop-loss
+            suggested_stop_loss = gemini_analysis.suggested_stop_loss
+            
+            # Add green/red flags to reasons
+            if gemini_analysis.green_flags:
+                reasons.append(f"Green: {gemini_analysis.green_flags[0]}")
+            if gemini_analysis.red_flags:
+                reasons.append(f"Red: {gemini_analysis.red_flags[0]}")
         
         # Adjust confidence based on news sentiment
         if news:
@@ -508,7 +782,7 @@ class FastTradePipeline:
             min_confidence = 0.55  # Lower threshold for fast entry
             if confidence >= min_confidence:
                 amount = max_amount * confidence
-                return TradeDecision(
+                decision = TradeDecision(
                     user_id=user_id,
                     action="buy",
                     token_mint=token,
@@ -516,6 +790,9 @@ class FastTradePipeline:
                     confidence=confidence,
                     reason=f"Fast buy: {', '.join(reasons)}",
                 )
+                # Attach Gemini-suggested stop loss as metadata
+                decision._gemini_stop_loss = suggested_stop_loss
+                return decision
         
         elif pattern == PatternType.MID_PUMP:
             # More selective with mid pumps
@@ -523,7 +800,7 @@ class FastTradePipeline:
             if confidence >= min_confidence:
                 # Smaller position for chasing pumps
                 amount = max_amount * 0.6 * confidence
-                return TradeDecision(
+                decision = TradeDecision(
                     user_id=user_id,
                     action="buy",
                     token_mint=token,
@@ -531,6 +808,8 @@ class FastTradePipeline:
                     confidence=confidence,
                     reason=f"Momentum entry: {', '.join(reasons)}",
                 )
+                decision._gemini_stop_loss = suggested_stop_loss
+                return decision
         
         elif pattern == PatternType.MEGA_PUMP:
             # Be very careful with mega pumps (often top signals)
@@ -538,7 +817,7 @@ class FastTradePipeline:
             if confidence >= min_confidence and stage == "early":
                 # Only enter early-stage mega pumps
                 amount = max_amount * 0.4 * confidence
-                return TradeDecision(
+                decision = TradeDecision(
                     user_id=user_id,
                     action="buy",
                     token_mint=token,
@@ -546,6 +825,9 @@ class FastTradePipeline:
                     confidence=confidence,
                     reason=f"FOMO entry: {', '.join(reasons)}",
                 )
+                # Use tighter stop loss for mega pumps (they reverse fast)
+                decision._gemini_stop_loss = suggested_stop_loss or 0.08
+                return decision
         
         return None
     
@@ -573,11 +855,15 @@ class FastTradePipeline:
                 
                 # Add to risk guard if buy
                 if decision.action == "buy":
+                    # Use Gemini-suggested stop loss if available
+                    gemini_stop_loss = getattr(decision, '_gemini_stop_loss', None)
+                    
                     self.risk_guard.add_position(
                         user_id=decision.user_id,
                         token_mint=decision.token_mint,
                         entry_price=float(result.get("price_paid", decision.amount)),
                         amount=decision.amount,
+                        custom_stop_loss=gemini_stop_loss,  # Gemini-recommended stop loss
                     )
                 
             logger.info(f"Trade executed: {decision.action} {decision.token_mint}")

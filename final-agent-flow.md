@@ -288,7 +288,66 @@ def _make_fast_decision(self, signal, max_amount):
         return BUY(amount=max_position * confidence)
 ```
 
-#### 5.5 Emergency Exit Handler
+#### 5.5 Gemini Scam Detection (New Tokens)
+
+**Purpose**: Use Google Gemini AI to analyze unknown tokens before buying.
+
+**When It Triggers**:
+- First time seeing a token (not in trend_signals.csv)
+- Token pumping but no history
+- High-risk patterns detected
+
+**What Gemini Analyzes**:
+```
+RED FLAGS (Increase Risk Score):
+├── Token name copies famous coins (fake PEPE, DOGE)
+├── Creator holds >30% of supply
+├── Very few holders (<50)
+├── Token age < 1 hour with huge pump
+├── No social media presence
+├── Liquidity < $5,000
+├── Price pumped >100% in <10 minutes
+└── Deployer has history of rugged tokens
+
+GREEN FLAGS (Decrease Risk Score):
+├── Active community on Twitter/Telegram
+├── Verified contract / mint authority revoked
+├── Good holder distribution (no whale >20%)
+├── Decent liquidity (>$20,000)
+├── Token exists >24 hours
+└── Creator has successful token history
+```
+
+**Risk Levels**:
+| Level | Risk Score | Action |
+|-------|------------|--------|
+| `SAFE` | 0.0-0.3 | Trade normally (+10% confidence) |
+| `CAUTION` | 0.3-0.6 | Reduced position size (70%) |
+| `HIGH_RISK` | 0.6-0.8 | Block unless explicit allow |
+| `SCAM` | 0.8-1.0 | **BLOCK ENTIRELY** |
+
+**Output Integration**:
+```python
+# In _consider_entry():
+if self._is_new_token(token):
+    analysis = self._analyze_new_token(token)
+    
+    if analysis.risk_level == SCAM:
+        return  # Block trade
+    
+    if analysis.risk_level == HIGH_RISK:
+        return  # Block unless should_trade=True
+    
+    # Use Gemini's recommended stop-loss
+    custom_stop_loss = analysis.suggested_stop_loss
+    
+    # Reduce position for CAUTION tokens
+    max_position *= analysis.max_position_percent
+```
+
+**Caching**: Results cached for 5 minutes to avoid API spam.
+
+#### 5.6 Emergency Exit Handler
 ```python
 # Bypasses normal pipeline for speed
 # Accepts higher slippage (10%)
