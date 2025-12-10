@@ -1,0 +1,208 @@
+# NUAH Trading Agents - Docker Compose
+# =====================================
+# Orchestrates all agents for pump.fun-style meme coin trading
+#
+# Usage:
+#   docker-compose up -d                    # Start all services
+#   docker-compose up -d trade-agent ui     # Start specific services
+#   docker-compose logs -f trade-agent      # Follow logs
+#   docker-compose down                     # Stop all services
+
+version: '3.8'
+
+services:
+  # ===========================================================================
+  # LAYER 1: DATA SYNC
+  # ===========================================================================
+  
+  fetch-data-agent:
+    build:
+      context: ./fetch-data-agent
+      dockerfile: Dockerfile
+    container_name: nuah-fetch-data-agent
+    restart: unless-stopped
+    environment:
+      - NUAHCHAIN_API_URL=${NUAHCHAIN_API_URL:-http://host.docker.internal:8080}
+      - NUAHCHAIN_API_TOKEN=${NUAHCHAIN_API_TOKEN}
+      - FETCH_INTERVAL_MINUTES=${FETCH_INTERVAL_MINUTES:-5}
+    volumes:
+      - shared-data:/app/data
+    networks:
+      - nuah-network
+    depends_on:
+      - nuahchain-backend
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  # ===========================================================================
+  # LAYER 2: ANALYSIS AGENTS (Background Intelligence)
+  # ===========================================================================
+  
+  news-agent:
+    build:
+      context: ./news-agent
+      dockerfile: Dockerfile
+    container_name: nuah-news-agent
+    restart: unless-stopped
+    environment:
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - NEWS_INTERVAL_MINUTES=${NEWS_INTERVAL_MINUTES:-5}
+      - NEWS_AGENT_DATA_DIR=/app/data
+      - OUTPUT_DIR=/app/output
+    volumes:
+      - shared-data:/app/data
+      - agent-signals:/app/output
+    networks:
+      - nuah-network
+    depends_on:
+      - fetch-data-agent
+
+  trend-agent:
+    build:
+      context: ./trend-agent
+      dockerfile: Dockerfile
+    container_name: nuah-trend-agent
+    restart: unless-stopped
+    environment:
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - TREND_INTERVAL_MINUTES=${TREND_INTERVAL_MINUTES:-5}
+      - TREND_AGENT_DATA_DIR=/app/data
+      - OUTPUT_DIR=/app/output
+    volumes:
+      - shared-data:/app/data
+      - agent-signals:/app/output
+    networks:
+      - nuah-network
+    depends_on:
+      - fetch-data-agent
+
+  rules-agent:
+    build:
+      context: ./rules-agent
+      dockerfile: Dockerfile
+    container_name: nuah-rules-agent
+    restart: unless-stopped
+    environment:
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - RULES_INTERVAL_MINUTES=${RULES_INTERVAL_MINUTES:-5}
+      - RULES_AGENT_DATA_DIR=/app/data
+      - OUTPUT_DIR=/app/output
+    volumes:
+      - shared-data:/app/data
+      - agent-signals:/app/output
+    networks:
+      - nuah-network
+    depends_on:
+      - fetch-data-agent
+
+  # ===========================================================================
+  # LAYER 3: TRADING (Real-time Fast Pipeline)
+  # ===========================================================================
+  
+  trade-agent:
+    build:
+      context: ./trade-agent
+      dockerfile: Dockerfile
+    container_name: nuah-trade-agent
+    restart: unless-stopped
+    environment:
+      # Core settings
+      - TRADING_MODE=${TRADING_MODE:-fast}
+      - DRY_RUN=${DRY_RUN:-true}
+      - USER_IDS=${USER_IDS:-1,2,3,4,5}
+      - SQLITE_PATH=/app/data/user_data.db
+      - API_BASE_URL=${NUAHCHAIN_API_URL:-http://host.docker.internal:8080}
+      - API_TOKEN=${NUAHCHAIN_API_TOKEN}
+      - DATA_DIR=/app/signals
+      
+      # Fast mode settings
+      - PRICE_POLL_INTERVAL_SECONDS=${PRICE_POLL_INTERVAL_SECONDS:-5}
+      - DECISION_INTERVAL_SECONDS=${DECISION_INTERVAL_SECONDS:-15}
+      - STOP_LOSS_PERCENT=${STOP_LOSS_PERCENT:-0.10}
+      - TRAILING_STOP_PERCENT=${TRAILING_STOP_PERCENT:-0.08}
+      - TAKE_PROFIT_PERCENT=${TAKE_PROFIT_PERCENT:-0.25}
+      - EMERGENCY_EXIT_THRESHOLD=${EMERGENCY_EXIT_THRESHOLD:--0.30}
+      - RUG_THRESHOLD_1M=${RUG_THRESHOLD_1M:--0.50}
+      - PUMP_THRESHOLD_1M=${PUMP_THRESHOLD_1M:-0.05}
+      - DUMP_THRESHOLD_1M=${DUMP_THRESHOLD_1M:--0.10}
+      - VOLUME_SPIKE_THRESHOLD=${VOLUME_SPIKE_THRESHOLD:-3.0}
+      
+      # Gemini scam detection
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-2.0-flash}
+      - ENABLE_TOKEN_ANALYZER=${ENABLE_TOKEN_ANALYZER:-true}
+      - TOKEN_ANALYZER_CACHE_TTL=${TOKEN_ANALYZER_CACHE_TTL:-300}
+    volumes:
+      - shared-data:/app/data
+      - agent-signals:/app/signals
+      - trade-logs:/app/logs
+    networks:
+      - nuah-network
+    depends_on:
+      - news-agent
+      - trend-agent
+      - rules-agent
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  # ===========================================================================
+  # UI DASHBOARD
+  # ===========================================================================
+  
+  ui:
+    build:
+      context: ./UI
+      dockerfile: Dockerfile
+    container_name: nuah-ui
+    restart: unless-stopped
+    ports:
+      - "${UI_PORT:-8000}:8000"
+    environment:
+      - SQLITE_PATH=/app/data/user_data.db
+    volumes:
+      - shared-data:/app/data:ro
+    networks:
+      - nuah-network
+    depends_on:
+      - trade-agent
+
+  # ===========================================================================
+  # EXTERNAL DEPENDENCY (Optional - if running locally)
+  # ===========================================================================
+  
+  # Uncomment if you want to run nuahchain-backend in Docker too
+  # nuahchain-backend:
+  #   image: nuahchain-backend:latest
+  #   container_name: nuahchain-backend
+  #   ports:
+  #     - "8080:8080"
+  #   environment:
+  #     - DATABASE_URL=postgres://user:pass@postgres:5432/nuah
+  #   networks:
+  #     - nuah-network
+
+# ===========================================================================
+# VOLUMES
+# ===========================================================================
+
+volumes:
+  # Shared SQLite database (user_data.db)
+  shared-data:
+    driver: local
+  
+  # Agent signal outputs (CSV files)
+  agent-signals:
+    driver: local
+  
+  # Trade execution logs
+  trade-logs:
+    driver: local
+
+# ===========================================================================
+# NETWORKS
+# ===========================================================================
+
+networks:
+  nuah-network:
+    driver: bridge
+
