@@ -2,16 +2,18 @@
 NUAH Trading Dashboard - FastAPI Backend
 
 Serves the UI and provides API endpoints to query trade data from SQLite.
+Includes LLM usage cost tracking endpoints.
 """
 
 import os
+import sys
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -22,6 +24,13 @@ SQLITE_PATH = os.environ.get(
     "SQLITE_PATH",
     str(UI_DIR.parent / "fetch-data-agent" / "data" / "user_data.db")
 )
+LLM_USAGE_DB_PATH = os.environ.get(
+    "LLM_USAGE_DB_PATH",
+    str(UI_DIR.parent / "data" / "llm_usage.db")
+)
+
+# Add shared module to path for LLM logger
+sys.path.insert(0, str(UI_DIR.parent))
 
 app = FastAPI(
     title="NUAH Trading Dashboard",
@@ -110,6 +119,16 @@ async def serve_chart():
     if chart_path.exists():
         return FileResponse(chart_path)
     raise HTTPException(status_code=404, detail="chart.html not found")
+
+
+@app.get("/llm-costs", response_class=HTMLResponse)
+@app.get("/llm-costs.html", response_class=HTMLResponse)
+async def serve_llm_costs():
+    """Serve the LLM costs tracking page."""
+    llm_costs_path = UI_DIR / "llm-costs.html"
+    if llm_costs_path.exists():
+        return FileResponse(llm_costs_path)
+    raise HTTPException(status_code=404, detail="llm-costs.html not found")
 
 
 # ============================================================================
@@ -567,6 +586,259 @@ async def get_user_breakdown():
 
 
 # ============================================================================
+# LLM Usage/Cost Tracking Endpoints
+# ============================================================================
+
+def get_llm_db():
+    """Get a connection to the LLM usage database."""
+    if not Path(LLM_USAGE_DB_PATH).exists():
+        return None
+    conn = sqlite3.connect(LLM_USAGE_DB_PATH, timeout=30)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+@app.get("/api/llm/daily-summary")
+async def get_llm_daily_summary(date: Optional[str] = None):
+    """
+    Get LLM usage summary for a specific date (defaults to today).
+    
+    Returns total cost, token counts, success rate, and breakdowns by agent/model.
+    """
+    conn = get_llm_db()
+    if conn is None:
+        return {
+            "date": date or datetime.now().strftime("%Y-%m-%d"),
+            "total_requests": 0,
+            "total_input_tokens": 0,
+            "total_output_tokens": 0,
+            "total_cost_usd": 0.0,
+            "avg_duration_ms": 0.0,
+            "successful_requests": 0,
+            "success_rate": 100.0,
+            "by_agent": [],
+            "by_model": [],
+            "message": "No LLM usage database found"
+        }
+    
+    try:
+        if date is None:
+            date = datetime.now().strftime("%Y-%m-%d")
+        
+        cursor = conn.cursor()
+        
+        # Check if table exists
+        cursor.execute("""
+            SELECT name FROM sqlite_master 
+            WHERE type='table' AND name='llm_usage'
+        """)
+        if not cursor.fetchone():
+            return {
+                "date": date,
+                "total_requests": 0,
+                "total_input_tokens": 0,
+                "total_output_tokens": 0,
+                "total_cost_usd": 0.0,
+                "avg_duration_ms": 0.0,
+                "successful_requests": 0,
+                "success_rate": 100.0,
+                "by_agent": [],
+                "by_model": [],
+                "message": "No llm_usage table found"
+            }
+        
+        # Total summary
+        cursor.execute("""
+            SELECT 
+                COUNT(*) as total_requests,
+                COALESCE(SUM(input_tokens), 0) as total_input_tokens,
+                COALESCE(SUM(output_tokens), 0) as total_output_tokens,
+                COALESCE(SUM(cost_usd), 0) as total_cost,
+                COALESCE(AVG(duration_ms), 0) as avg_duration_ms,
+                SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) as successful_requests
+            FROM llm_usage
+            WHERE date(timestamp) = ?
+        """, (date,))
+        
+        row = cursor.fetchone()
+        
+        total_requests = row["total_requests"] or 0
+        successful_requests = row["successful_requests"] or 0
+        
+        # By agent breakdown
+        cursor.execute("""
+            SELECT 
+                agent,
+                COUNT(*) as requests,
+                COALESCE(SUM(cost_usd), 0) as cost,
+                COALESCE(SUM(input_tokens), 0) as input_tokens,
+                COALESCE(SUM(output_tokens), 0) as output_tokens
+            FROM llm_usage
+            WHERE date(timestamp) = ?
+            GROUP BY agent
+            ORDER BY cost DESC
+        """, (date,))
+        
+        agents = [dict(r) for r in cursor.fetchall()]
+        
+        # By model breakdown
+        cursor.execute("""
+            SELECT 
+                model,
+                COUNT(*) as requests,
+                COALESCE(SUM(cost_usd), 0) as cost,
+                COALESCE(SUM(input_tokens), 0) as input_tokens,
+                COALESCE(SUM(output_tokens), 0) as output_tokens
+            FROM llm_usage
+            WHERE date(timestamp) = ?
+            GROUP BY model
+            ORDER BY cost DESC
+        """, (date,))
+        
+        models = [dict(r) for r in cursor.fetchall()]
+        
+        return {
+            "date": date,
+            "total_requests": total_requests,
+            "total_input_tokens": row["total_input_tokens"] or 0,
+            "total_output_tokens": row["total_output_tokens"] or 0,
+            "total_cost_usd": round(row["total_cost"] or 0, 6),
+            "avg_duration_ms": round(row["avg_duration_ms"] or 0, 2),
+            "successful_requests": successful_requests,
+            "success_rate": round(
+                successful_requests / max(1, total_requests) * 100, 
+                1
+            ),
+            "by_agent": agents,
+            "by_model": models
+        }
+    finally:
+        conn.close()
+
+
+@app.get("/api/llm/hourly-costs")
+async def get_llm_hourly_costs(date: Optional[str] = None):
+    """
+    Get hourly LLM cost breakdown for charting.
+    """
+    conn = get_llm_db()
+    if conn is None:
+        return {"hourly": [], "date": date or datetime.now().strftime("%Y-%m-%d")}
+    
+    try:
+        if date is None:
+            date = datetime.now().strftime("%Y-%m-%d")
+        
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT name FROM sqlite_master 
+            WHERE type='table' AND name='llm_usage'
+        """)
+        if not cursor.fetchone():
+            return {"hourly": [], "date": date}
+        
+        cursor.execute("""
+            SELECT 
+                strftime('%H', timestamp) as hour,
+                COUNT(*) as requests,
+                COALESCE(SUM(cost_usd), 0) as cost,
+                COALESCE(SUM(input_tokens), 0) as input_tokens,
+                COALESCE(SUM(output_tokens), 0) as output_tokens
+            FROM llm_usage
+            WHERE date(timestamp) = ?
+            GROUP BY strftime('%H', timestamp)
+            ORDER BY hour
+        """, (date,))
+        
+        hourly = [dict(row) for row in cursor.fetchall()]
+        
+        return {"hourly": hourly, "date": date}
+    finally:
+        conn.close()
+
+
+@app.get("/api/llm/cost-timeline")
+async def get_llm_cost_timeline(days: int = Query(default=7, ge=1, le=90)):
+    """
+    Get daily LLM cost breakdown for the last N days.
+    """
+    conn = get_llm_db()
+    if conn is None:
+        return {"timeline": [], "days": days}
+    
+    try:
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT name FROM sqlite_master 
+            WHERE type='table' AND name='llm_usage'
+        """)
+        if not cursor.fetchone():
+            return {"timeline": [], "days": days}
+        
+        cursor.execute("""
+            SELECT 
+                date(timestamp) as date,
+                COUNT(*) as requests,
+                COALESCE(SUM(cost_usd), 0) as cost,
+                COALESCE(SUM(input_tokens), 0) as input_tokens,
+                COALESCE(SUM(output_tokens), 0) as output_tokens
+            FROM llm_usage
+            WHERE timestamp >= datetime('now', ?)
+            GROUP BY date(timestamp)
+            ORDER BY date
+        """, (f"-{days} days",))
+        
+        timeline = [dict(row) for row in cursor.fetchall()]
+        
+        return {"timeline": timeline, "days": days}
+    finally:
+        conn.close()
+
+
+@app.get("/api/llm/recent-usage")
+async def get_llm_recent_usage(limit: int = Query(default=100, ge=1, le=500)):
+    """
+    Get recent LLM usage records.
+    """
+    conn = get_llm_db()
+    if conn is None:
+        return {"usage": [], "count": 0}
+    
+    try:
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT name FROM sqlite_master 
+            WHERE type='table' AND name='llm_usage'
+        """)
+        if not cursor.fetchone():
+            return {"usage": [], "count": 0}
+        
+        cursor.execute("""
+            SELECT 
+                id, timestamp, agent, model, user_id,
+                input_tokens, output_tokens, cost_usd,
+                request_summary, response_summary,
+                duration_ms, success, error_message
+            FROM llm_usage
+            ORDER BY timestamp DESC
+            LIMIT ?
+        """, (limit,))
+        
+        usage = []
+        for row in cursor.fetchall():
+            record = dict(row)
+            record['success'] = bool(record.get('success', 1))
+            usage.append(record)
+        
+        return {"usage": usage, "count": len(usage)}
+    finally:
+        conn.close()
+
+
+# ============================================================================
 # Main Entry Point
 # ============================================================================
 
@@ -591,4 +863,5 @@ if __name__ == "__main__":
         reload=True,
         log_level="info"
     )
+
 

@@ -1,0 +1,567 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LLM Costs - NUAH Trading Dashboard</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>💰</text></svg>">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header class="header">
+            <div class="logo">
+                <div class="logo-icon">N</div>
+                <div class="logo-text">
+                    <h1>NUAH</h1>
+                    <span>Trading Dashboard</span>
+                </div>
+            </div>
+            <nav class="nav">
+                <a href="/" class="nav-link">Dashboard</a>
+                <a href="/graph.html" class="nav-link">Graph</a>
+                <a href="/chart.html" class="nav-link">Charts</a>
+                <a href="/llm-costs.html" class="nav-link active">LLM Costs</a>
+            </nav>
+        </header>
+
+        <!-- Main Cost Display -->
+        <section id="cost-hero" class="pnl-hero">
+            <div class="pnl-label">Today's Total LLM Cost</div>
+            <div class="pnl-value" id="total-cost" style="color: var(--accent-yellow);">$0.000000</div>
+            <div class="pnl-date" id="current-time">Loading...</div>
+        </section>
+
+        <!-- Stats Grid -->
+        <section class="grid grid-4 mb-lg">
+            <div class="card stat-card">
+                <div class="card-header">
+                    <span class="card-title">Total Requests</span>
+                    <div class="card-icon neutral">📤</div>
+                </div>
+                <div class="stat-value neutral" id="total-requests">0</div>
+                <div class="stat-label">API calls today</div>
+            </div>
+
+            <div class="card stat-card">
+                <div class="card-header">
+                    <span class="card-title">Input Tokens</span>
+                    <div class="card-icon positive">📝</div>
+                </div>
+                <div class="stat-value positive" id="input-tokens">0</div>
+                <div class="stat-label">Tokens sent</div>
+            </div>
+
+            <div class="card stat-card">
+                <div class="card-header">
+                    <span class="card-title">Output Tokens</span>
+                    <div class="card-icon positive">📄</div>
+                </div>
+                <div class="stat-value positive" id="output-tokens">0</div>
+                <div class="stat-label">Tokens received</div>
+            </div>
+
+            <div class="card stat-card">
+                <div class="card-header">
+                    <span class="card-title">Success Rate</span>
+                    <div class="card-icon positive">✓</div>
+                </div>
+                <div class="stat-value positive" id="success-rate">100%</div>
+                <div class="stat-label" id="success-count">0 / 0 successful</div>
+            </div>
+        </section>
+
+        <!-- Cost Charts Row -->
+        <section class="grid grid-2 mb-lg">
+            <!-- Hourly Cost Chart -->
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">Hourly Cost Breakdown</span>
+                    <span class="badge badge-info" id="avg-cost-badge">$0.00/hr avg</span>
+                </div>
+                <div class="chart-container">
+                    <canvas id="hourly-cost-chart"></canvas>
+                </div>
+            </div>
+
+            <!-- Cost by Agent Chart -->
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">Cost by Agent</span>
+                    <span class="badge badge-info" id="agents-count">0 agents</span>
+                </div>
+                <div class="chart-container">
+                    <canvas id="agent-cost-chart"></canvas>
+                </div>
+            </div>
+        </section>
+
+        <!-- Cost by Model & 7-Day Timeline -->
+        <section class="grid grid-2 mb-lg">
+            <!-- Cost by Model -->
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">Cost by Model</span>
+                    <span class="badge badge-info" id="models-count">0 models</span>
+                </div>
+                <div class="chart-container">
+                    <canvas id="model-cost-chart"></canvas>
+                </div>
+            </div>
+
+            <!-- 7-Day Timeline -->
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">7-Day Cost Timeline</span>
+                    <span class="badge badge-info" id="weekly-total">$0.00 total</span>
+                </div>
+                <div class="chart-container">
+                    <canvas id="weekly-cost-chart"></canvas>
+                </div>
+            </div>
+        </section>
+
+        <!-- Recent Usage Table -->
+        <section class="card">
+            <div class="card-header">
+                <span class="card-title">Recent LLM Requests</span>
+                <span class="badge badge-info" id="usage-count-badge">0 requests</span>
+            </div>
+            <div class="table-container" id="usage-table">
+                <div class="loading">
+                    <div class="loading-spinner"></div>
+                    <span>Loading usage data...</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- Footer -->
+        <footer class="footer">
+            <p>NUAH Multi-Agent Trading System • LLM Cost Tracking Dashboard</p>
+            <p class="mt-sm">Data refreshes automatically every 30 seconds</p>
+        </footer>
+    </div>
+
+    <script src="/static/js/common.js"></script>
+    <script>
+        // Chart instances
+        let hourlyCostChart = null;
+        let agentCostChart = null;
+        let modelCostChart = null;
+        let weeklyCostChart = null;
+
+        /**
+         * Format cost value with appropriate precision
+         */
+        function formatCost(value) {
+            const num = parseFloat(value) || 0;
+            if (num < 0.000001) return '$0.000000';
+            if (num < 0.01) return `$${num.toFixed(6)}`;
+            if (num < 1) return `$${num.toFixed(4)}`;
+            return `$${num.toFixed(2)}`;
+        }
+
+        /**
+         * Format large numbers with K/M suffix
+         */
+        function formatNumber(num) {
+            if (num >= 1000000) return `${(num / 1000000).toFixed(1)}M`;
+            if (num >= 1000) return `${(num / 1000).toFixed(1)}K`;
+            return num.toString();
+        }
+
+        /**
+         * Get agent badge HTML
+         */
+        function getAgentBadge(agent) {
+            const colors = {
+                'news-agent': 'badge-success',
+                'trend-agent': 'badge-info',
+                'rules-agent': 'badge-warning',
+                'trade-agent': 'badge-danger'
+            };
+            const colorClass = colors[agent] || 'badge-info';
+            return `<span class="badge ${colorClass}">${agent}</span>`;
+        }
+
+        /**
+         * Get model badge HTML
+         */
+        function getModelBadge(model) {
+            const shortName = model.includes('/') ? model.split('/').pop() : model;
+            const isGemini = model.toLowerCase().includes('gemini');
+            return `<span class="badge ${isGemini ? 'badge-warning' : 'badge-info'}">${shortName}</span>`;
+        }
+
+        /**
+         * Load and display daily summary
+         */
+        async function loadDailySummary() {
+            try {
+                const data = await fetchAPI('/api/llm/daily-summary');
+                
+                // Update cost hero
+                document.getElementById('total-cost').textContent = formatCost(data.total_cost_usd);
+                
+                // Update stats
+                document.getElementById('total-requests').textContent = formatNumber(data.total_requests);
+                document.getElementById('input-tokens').textContent = formatNumber(data.total_input_tokens);
+                document.getElementById('output-tokens').textContent = formatNumber(data.total_output_tokens);
+                document.getElementById('success-rate').textContent = `${data.success_rate}%`;
+                document.getElementById('success-count').textContent = 
+                    `${data.successful_requests} / ${data.total_requests} successful`;
+                
+                // Update agent breakdown chart
+                updateAgentChart(data.by_agent);
+                document.getElementById('agents-count').textContent = `${data.by_agent.length} agents`;
+                
+                // Update model breakdown chart
+                updateModelChart(data.by_model);
+                document.getElementById('models-count').textContent = `${data.by_model.length} models`;
+                
+            } catch (error) {
+                console.error('Failed to load daily summary:', error);
+            }
+        }
+
+        /**
+         * Load hourly cost data for chart
+         */
+        async function loadHourlyCosts() {
+            try {
+                const data = await fetchAPI('/api/llm/hourly-costs');
+                updateHourlyChart(data.hourly);
+                
+                // Calculate average
+                if (data.hourly && data.hourly.length > 0) {
+                    const totalCost = data.hourly.reduce((sum, h) => sum + (h.cost || 0), 0);
+                    const avgCost = totalCost / data.hourly.length;
+                    document.getElementById('avg-cost-badge').textContent = 
+                        `${formatCost(avgCost)}/hr avg`;
+                }
+                
+            } catch (error) {
+                console.error('Failed to load hourly costs:', error);
+            }
+        }
+
+        /**
+         * Load weekly cost timeline
+         */
+        async function loadWeeklyCosts() {
+            try {
+                const data = await fetchAPI('/api/llm/cost-timeline?days=7');
+                updateWeeklyChart(data.timeline);
+                
+                // Calculate total
+                if (data.timeline && data.timeline.length > 0) {
+                    const totalCost = data.timeline.reduce((sum, d) => sum + (d.cost || 0), 0);
+                    document.getElementById('weekly-total').textContent = 
+                        `${formatCost(totalCost)} total`;
+                }
+                
+            } catch (error) {
+                console.error('Failed to load weekly costs:', error);
+            }
+        }
+
+        /**
+         * Load recent usage records
+         */
+        async function loadRecentUsage() {
+            const container = document.getElementById('usage-table');
+            
+            try {
+                const data = await fetchAPI('/api/llm/recent-usage?limit=50');
+                
+                document.getElementById('usage-count-badge').textContent = `${data.count} requests`;
+                
+                if (!data.usage || data.usage.length === 0) {
+                    showEmpty(container, 'No LLM requests recorded yet. Requests will appear here as agents run.');
+                    return;
+                }
+                
+                let html = `
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Time</th>
+                                <th>Agent</th>
+                                <th>Model</th>
+                                <th>User</th>
+                                <th>Tokens (In/Out)</th>
+                                <th>Cost</th>
+                                <th>Duration</th>
+                                <th>Status</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                `;
+                
+                for (const usage of data.usage) {
+                    const statusClass = usage.success ? 'completed' : 'failed';
+                    const statusText = usage.success ? '✓ Success' : '✗ Failed';
+                    
+                    html += `
+                        <tr>
+                            <td class="cell-mono">${formatTime(usage.timestamp)}</td>
+                            <td>${getAgentBadge(usage.agent)}</td>
+                            <td>${getModelBadge(usage.model)}</td>
+                            <td class="cell-mono">${usage.user_id || '-'}</td>
+                            <td class="cell-mono">${formatNumber(usage.input_tokens)} / ${formatNumber(usage.output_tokens)}</td>
+                            <td class="cell-mono" style="color: var(--accent-yellow);">${formatCost(usage.cost_usd)}</td>
+                            <td class="cell-mono">${usage.duration_ms || 0}ms</td>
+                            <td><span class="cell-status ${statusClass}">${statusText}</span></td>
+                        </tr>
+                    `;
+                }
+                
+                html += '</tbody></table>';
+                container.innerHTML = html;
+                
+            } catch (error) {
+                console.error('Failed to load recent usage:', error);
+                showError(container, 'Failed to load LLM usage data. Make sure the server is running.');
+            }
+        }
+
+        /**
+         * Update hourly cost chart
+         */
+        function updateHourlyChart(hourlyData) {
+            const ctx = document.getElementById('hourly-cost-chart').getContext('2d');
+            
+            // Generate all 24 hours with zero default
+            const hours = Array.from({length: 24}, (_, i) => i.toString().padStart(2, '0'));
+            const costByHour = {};
+            
+            if (hourlyData) {
+                hourlyData.forEach(h => {
+                    costByHour[h.hour] = h.cost || 0;
+                });
+            }
+            
+            const data = hours.map(h => costByHour[h] || 0);
+            
+            if (hourlyCostChart) {
+                hourlyCostChart.data.datasets[0].data = data;
+                hourlyCostChart.update();
+                return;
+            }
+            
+            hourlyCostChart = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: hours.map(h => `${h}:00`),
+                    datasets: [{
+                        label: 'Cost ($)',
+                        data: data,
+                        backgroundColor: chartColors.yellowDim,
+                        borderColor: chartColors.yellow,
+                        borderWidth: 1,
+                        borderRadius: 4
+                    }]
+                },
+                options: {
+                    ...chartDefaults,
+                    plugins: {
+                        ...chartDefaults.plugins,
+                        legend: { display: false }
+                    },
+                    scales: {
+                        ...chartDefaults.scales,
+                        y: {
+                            ...chartDefaults.scales.y,
+                            ticks: {
+                                ...chartDefaults.scales.y.ticks,
+                                callback: (value) => `$${value.toFixed(4)}`
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        /**
+         * Update agent cost chart
+         */
+        function updateAgentChart(agentData) {
+            const ctx = document.getElementById('agent-cost-chart').getContext('2d');
+            
+            const labels = agentData.map(a => a.agent);
+            const costs = agentData.map(a => a.cost || 0);
+            const colors = [chartColors.cyan, chartColors.blue, chartColors.yellow, chartColors.red];
+            
+            if (agentCostChart) {
+                agentCostChart.data.labels = labels;
+                agentCostChart.data.datasets[0].data = costs;
+                agentCostChart.update();
+                return;
+            }
+            
+            agentCostChart = new Chart(ctx, {
+                type: 'doughnut',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        data: costs,
+                        backgroundColor: colors.slice(0, agentData.length),
+                        borderColor: '#161b22',
+                        borderWidth: 2
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: {
+                            position: 'right',
+                            labels: {
+                                color: '#8b949e',
+                                font: { family: "'Sora', sans-serif", size: 11 },
+                                padding: 15
+                            }
+                        },
+                        tooltip: {
+                            ...chartDefaults.plugins.tooltip,
+                            callbacks: {
+                                label: (context) => ` ${formatCost(context.parsed)}`
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        /**
+         * Update model cost chart
+         */
+        function updateModelChart(modelData) {
+            const ctx = document.getElementById('model-cost-chart').getContext('2d');
+            
+            const labels = modelData.map(m => {
+                const name = m.model || 'unknown';
+                return name.includes('/') ? name.split('/').pop() : name;
+            });
+            const costs = modelData.map(m => m.cost || 0);
+            const colors = [chartColors.purple, chartColors.cyan, chartColors.yellow, chartColors.blue];
+            
+            if (modelCostChart) {
+                modelCostChart.data.labels = labels;
+                modelCostChart.data.datasets[0].data = costs;
+                modelCostChart.update();
+                return;
+            }
+            
+            modelCostChart = new Chart(ctx, {
+                type: 'doughnut',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        data: costs,
+                        backgroundColor: colors.slice(0, modelData.length),
+                        borderColor: '#161b22',
+                        borderWidth: 2
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: {
+                            position: 'right',
+                            labels: {
+                                color: '#8b949e',
+                                font: { family: "'Sora', sans-serif", size: 11 },
+                                padding: 15
+                            }
+                        },
+                        tooltip: {
+                            ...chartDefaults.plugins.tooltip,
+                            callbacks: {
+                                label: (context) => ` ${formatCost(context.parsed)}`
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        /**
+         * Update weekly cost chart
+         */
+        function updateWeeklyChart(timelineData) {
+            const ctx = document.getElementById('weekly-cost-chart').getContext('2d');
+            
+            const labels = timelineData ? timelineData.map(d => {
+                const date = new Date(d.date);
+                return date.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+            }) : [];
+            const costs = timelineData ? timelineData.map(d => d.cost || 0) : [];
+            
+            if (weeklyCostChart) {
+                weeklyCostChart.data.labels = labels;
+                weeklyCostChart.data.datasets[0].data = costs;
+                weeklyCostChart.update();
+                return;
+            }
+            
+            weeklyCostChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        label: 'Daily Cost',
+                        data: costs,
+                        borderColor: chartColors.cyan,
+                        backgroundColor: chartColors.cyanDim,
+                        fill: true,
+                        tension: 0.3,
+                        pointBackgroundColor: chartColors.cyan,
+                        pointBorderColor: '#161b22',
+                        pointBorderWidth: 2,
+                        pointRadius: 4
+                    }]
+                },
+                options: {
+                    ...chartDefaults,
+                    plugins: {
+                        ...chartDefaults.plugins,
+                        legend: { display: false }
+                    },
+                    scales: {
+                        ...chartDefaults.scales,
+                        y: {
+                            ...chartDefaults.scales.y,
+                            ticks: {
+                                ...chartDefaults.scales.y.ticks,
+                                callback: (value) => `$${value.toFixed(2)}`
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        /**
+         * Initialize dashboard
+         */
+        async function initDashboard() {
+            await Promise.all([
+                loadDailySummary(),
+                loadHourlyCosts(),
+                loadWeeklyCosts(),
+                loadRecentUsage()
+            ]);
+        }
+
+        // Initial load
+        initDashboard();
+
+        // Auto-refresh every 30 seconds
+        setInterval(initDashboard, 30000);
+    </script>
+</body>
+</html>
